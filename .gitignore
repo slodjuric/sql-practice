@@ -1,0 +1,22 @@
+# ── Environment variables ────────────────────────────────────────────────────
+# Real .env files are never committed.
+# Only .env.example (with placeholder values) is safe to commit.
+.env
+.env.*
+!.env.example
+
+# ── Dependencies ─────────────────────────────────────────────────────────────
+node_modules/
+
+# ── Build output ─────────────────────────────────────────────────────────────
+dist/
+build/
+
+# ── Claude Code settings ─────────────────────────────────────────────────────
+# Developer-specific tool permissions and session state.
+.claude/
+
+# ── OS / editor noise ────────────────────────────────────────────────────────
+.DS_Store
+*.swp
+*.swo

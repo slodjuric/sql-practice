@@ -1,0 +1,48 @@
+'use strict';
+
+/**
+ * Runs a SQL file against the configured database.
+ * Usage: node scripts/run-sql-file.js [path/to/file.sql]
+ * Defaults to backend/db/init-practice-db.sql when no argument is given.
+ */
+
+const fs   = require('fs');
+const path = require('path');
+const { Client } = require('pg');
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
+
+const DEFAULT_SQL = path.resolve(__dirname, '../db/init-practice-db.sql');
+const sqlFile = process.argv[2] ? path.resolve(process.argv[2]) : DEFAULT_SQL;
+
+async function main() {
+  if (!fs.existsSync(sqlFile)) {
+    console.error(`File not found: ${sqlFile}`);
+    process.exit(1);
+  }
+
+  const client = new Client(
+    process.env.DATABASE_URL
+      ? { connectionString: process.env.DATABASE_URL }
+      : {
+          host:     process.env.DB_HOST     || 'localhost',
+          port:     parseInt(process.env.DB_PORT) || 5432,
+          database: process.env.DB_NAME     || 'sql_practice',
+          user:     process.env.DB_USER,
+          password: process.env.DB_PASSWORD || '',
+        }
+  );
+
+  await client.connect();
+  console.log(`Running ${path.relative(process.cwd(), sqlFile)} ...`);
+
+  const sql = fs.readFileSync(sqlFile, 'utf8');
+  await client.query(sql);
+  await client.end();
+
+  console.log('Done.');
+}
+
+main().catch(err => {
+  console.error('Error:', err.message);
+  process.exit(1);
+});
