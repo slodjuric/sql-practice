@@ -2075,6 +2075,11 @@ body {
   color: var(--text-muted);
 }
 
+.create-plan-required {
+  color: var(--red);
+  margin-left: 2px;
+}
+
 .create-plan-input {
   padding: 8px 12px;
   background: var(--bg-input);

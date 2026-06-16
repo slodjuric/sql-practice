@@ -87,7 +87,7 @@ function EditPlanForm({ activeSession, sessionFilters, onSave, onCancel }) {
   return (
     <form className="create-plan-form" onSubmit={handleSave}>
       <div className="create-plan-field">
-        <label className="create-plan-label">Plan name</label>
+        <label className="create-plan-label">Plan name <span className="create-plan-required">*</span></label>
         <input
           className="create-plan-input"
           type="text"

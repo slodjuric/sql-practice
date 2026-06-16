@@ -3,10 +3,10 @@
  *
  * ⚠️  INTENTIONAL DUPLICATION — KEEP IN SYNC
  * This function is mirrored in:
- *   backend/src/routes/progress.js → matchesSessionFilters (local function)
+ *   backend/src/utils/taskFilters.js → matchesSessionFilters
  *
  * Both implementations MUST stay identical in logic. If you change
- * the filter rules here, apply the same change in progress.js, and vice versa.
+ * the filter rules here, apply the same change in the backend copy, and vice versa.
  * A mismatch causes users to see different task sets in Practice vs Progress
  * for the same session.
  *
