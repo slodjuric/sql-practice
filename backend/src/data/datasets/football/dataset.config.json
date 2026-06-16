@@ -1,0 +1,48 @@
+{
+  "key": "football",
+  "name": "Football",
+  "schemaName": "football",
+  "description": "Football matches dataset with countries, leagues, teams and match results",
+  "type": "official",
+  "loadOrder": ["countries", "leagues", "teams", "matches"],
+  "tables": {
+    "countries": {
+      "csvFile": "country.csv",
+      "columns": [
+        { "name": "id",   "type": "INTEGER", "primaryKey": true },
+        { "name": "name", "type": "TEXT",    "nullable": false }
+      ]
+    },
+    "leagues": {
+      "csvFile": "league.csv",
+      "columns": [
+        { "name": "id",         "type": "INTEGER", "primaryKey": true },
+        { "name": "country_id", "type": "INTEGER", "nullable": false, "references": { "table": "countries", "column": "id" } },
+        { "name": "name",       "type": "TEXT",    "nullable": false }
+      ]
+    },
+    "teams": {
+      "csvFile": "team.csv",
+      "columns": [
+        { "name": "id",              "type": "INTEGER", "primaryKey": true },
+        { "name": "team_api_id",     "type": "INTEGER", "nullable": false, "unique": true },
+        { "name": "team_long_name",  "type": "TEXT",    "nullable": false },
+        { "name": "team_short_name", "type": "TEXT",    "nullable": true }
+      ]
+    },
+    "matches": {
+      "csvFile": "match.csv",
+      "columns": [
+        { "name": "id",          "type": "INTEGER",   "primaryKey": true },
+        { "name": "country_id",  "type": "INTEGER",   "nullable": false, "references": { "table": "countries", "column": "id" } },
+        { "name": "season",      "type": "TEXT",      "nullable": false },
+        { "name": "stage",       "type": "INTEGER",   "nullable": true },
+        { "name": "match_date",  "type": "TIMESTAMP", "nullable": true,  "sourceName": "date" },
+        { "name": "hometeam_id", "type": "INTEGER",   "nullable": false, "references": { "table": "teams", "column": "team_api_id" } },
+        { "name": "awayteam_id", "type": "INTEGER",   "nullable": false, "references": { "table": "teams", "column": "team_api_id" } },
+        { "name": "home_goal",   "type": "INTEGER",   "nullable": true },
+        { "name": "away_goal",   "type": "INTEGER",   "nullable": true }
+      ]
+    }
+  }
+}

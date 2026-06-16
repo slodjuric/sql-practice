@@ -131,6 +131,10 @@ export default function Sidebar({
   // Session form state
   const [showAddSession, setShowAddSession] = useState(false);
   const [newSessionName, setNewSessionName] = useState('');
+  const [newSessionDescription, setNewSessionDescription] = useState('');
+  const [availableDatasets, setAvailableDatasets] = useState([]);
+  const [datasetsLoading, setDatasetsLoading] = useState(false);
+  const [selectedDatasetId, setSelectedDatasetId] = useState(null);
   const [sessionAddError, setSessionAddError] = useState(null);
   const [sessionSaving, setSessionSaving] = useState(false);
   const [sessionDeleting, setSessionDeleting] = useState(false);
@@ -139,6 +143,20 @@ export default function Sidebar({
   const [sessionActioning, setSessionActioning] = useState(false);
 
   useEffect(() => { setSessionActionError(null); }, [activeSession?.id]);
+
+  // Invalidate the table cache whenever the active session (and thus dataset) changes.
+  // If the DB tree is already open, reload immediately for the new session.
+  useEffect(() => {
+    setTables([]);
+    setTablesError(null);
+    if (dbOpen) {
+      setTablesLoading(true);
+      api.tables.list(activeSession?.id)
+        .then(setTables)
+        .catch(() => setTablesError('Could not load tables'))
+        .finally(() => setTablesLoading(false));
+    }
+  }, [activeSession?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     api.health()
@@ -152,7 +170,7 @@ export default function Sidebar({
     if (opening && tables.length === 0 && !tablesError) {
       setTablesLoading(true);
       setTablesError(null);
-      api.tables.list()
+      api.tables.list(activeSession?.id)
         .then(setTables)
         .catch(() => setTablesError('Could not load tables'))
         .finally(() => setTablesLoading(false));
@@ -201,8 +219,25 @@ export default function Sidebar({
   // ── Session handlers ────────────────────────────────────────
   function openAddSession() {
     setNewSessionName('');
+    setNewSessionDescription('');
+    setSelectedDatasetId(null);
     setSessionAddError(null);
     setShowAddSession(true);
+    setDatasetsLoading(true);
+    api.datasets.list()
+      .then(list => {
+        setAvailableDatasets(list);
+        if (list.length > 0) setSelectedDatasetId(list[0].id);
+      })
+      .catch(() => setAvailableDatasets([]))
+      .finally(() => setDatasetsLoading(false));
+  }
+
+  function closeAddSession() {
+    setShowAddSession(false);
+    setSessionAddError(null);
+    setNewSessionDescription('');
+    setSelectedDatasetId(null);
   }
 
   async function handleSaveSession() {
@@ -210,9 +245,11 @@ export default function Sidebar({
     setSessionSaving(true);
     setSessionAddError(null);
     try {
-      await onCreateSession(newSessionName.trim(), null);
+      await onCreateSession(newSessionName.trim(), newSessionDescription.trim() || null, 'topic', [], [], [], [], selectedDatasetId);
       setShowAddSession(false);
       setNewSessionName('');
+      setNewSessionDescription('');
+      setSelectedDatasetId(null);
     } catch (err) {
       setSessionAddError(err.message);
     } finally {
@@ -403,16 +440,41 @@ export default function Sidebar({
               placeholder="Session name..."
               onKeyDown={e => {
                 if (e.key === 'Enter') handleSaveSession();
-                if (e.key === 'Escape') { setShowAddSession(false); setSessionAddError(null); }
+                if (e.key === 'Escape') closeAddSession();
               }}
               autoFocus
               disabled={sessionSaving}
             />
+            <div className="sidebar-add-session-dataset-row">
+              {datasetsLoading ? (
+                <span className="sidebar-add-session-dataset-loading">Loading…</span>
+              ) : (
+                <select
+                  className="sidebar-add-session-select"
+                  value={selectedDatasetId ?? ''}
+                  onChange={e => setSelectedDatasetId(parseInt(e.target.value, 10))}
+                  disabled={sessionSaving || availableDatasets.length <= 1}
+                >
+                  {availableDatasets.map(d => (
+                    <option key={d.id} value={d.id}>{d.name}</option>
+                  ))}
+                </select>
+              )}
+              <span className="sidebar-add-session-dataset-hint">Dataset (fixed after creation)</span>
+            </div>
+            <textarea
+              className="sidebar-add-session-textarea"
+              value={newSessionDescription}
+              onChange={e => setNewSessionDescription(e.target.value)}
+              placeholder="Description (optional)..."
+              disabled={sessionSaving}
+              rows={2}
+            />
             <div className="sidebar-add-session-actions">
-              <button className="sidebar-add-session-save" onClick={handleSaveSession} disabled={sessionSaving || !newSessionName.trim()}>
+              <button className="sidebar-add-session-save" onClick={handleSaveSession} disabled={sessionSaving || !newSessionName.trim() || !selectedDatasetId}>
                 {sessionSaving ? '...' : 'Save'}
               </button>
-              <button className="sidebar-add-session-cancel" onClick={() => { setShowAddSession(false); setSessionAddError(null); }} disabled={sessionSaving}>
+              <button className="sidebar-add-session-cancel" onClick={closeAddSession} disabled={sessionSaving}>
                 Cancel
               </button>
             </div>

@@ -254,6 +254,62 @@ body {
   color: var(--red);
 }
 
+.sidebar-add-session-dataset-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 6px;
+}
+
+.sidebar-add-session-select {
+  width: 100%;
+  padding: 5px 8px;
+  background: var(--bg-main);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+}
+
+.sidebar-add-session-select:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
+.sidebar-add-session-select:focus {
+  border-color: var(--accent);
+}
+
+.sidebar-add-session-dataset-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.sidebar-add-session-dataset-loading {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.sidebar-add-session-textarea {
+  width: 100%;
+  padding: 5px 8px;
+  background: var(--bg-main);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-size: 12px;
+  outline: none;
+  margin-bottom: 6px;
+  resize: vertical;
+  font-family: inherit;
+}
+
+.sidebar-add-session-textarea:focus {
+  border-color: var(--accent);
+}
+
 /* ===== Session locked banner (in TaskView) ===== */
 .session-completed-banner {
   padding: 10px 16px;

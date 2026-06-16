@@ -8,6 +8,7 @@ const tasksRouter = require('./routes/tasks');
 const progressRouter = require('./routes/progress');
 const usersRouter = require('./routes/users');
 const sessionsRouter = require('./routes/sessions');
+const datasetsRouter = require('./routes/datasets');
 const pool = require('./db');
 const initDb = require('./initDb');
 
@@ -19,6 +20,7 @@ app.use(express.json());
 
 app.use('/api/users', usersRouter);
 app.use('/api/sessions', sessionsRouter);
+app.use('/api/datasets', datasetsRouter);
 app.use('/api/tables', tablesRouter);
 app.use('/api/query', queryRouter);
 app.use('/api/tasks', tasksRouter);

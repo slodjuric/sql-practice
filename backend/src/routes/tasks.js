@@ -10,8 +10,9 @@ const {
   validateRequiredOrderBy,
 } = require('../utils/sqlStructureValidator');
 const { compareResults } = require('../utils/resultComparator');
-const { validateSqlSafety } = require('../utils/sqlSafetyValidator');
-const { executeUserQuery, ROW_LIMIT, QUERY_TIMEOUT } = require('../utils/queryRunner');
+const { validateSqlSafety, validateSchemaScope } = require('../utils/sqlSafetyValidator');
+const { executeUserQuery, executeSolutionQuery, ROW_LIMIT, QUERY_TIMEOUT } = require('../utils/queryRunner');
+const { getDatasetBySessionId, getAllDatasetSchemaNames } = require('../utils/datasetResolver');
 
 // GET /api/tasks/categories
 router.get('/categories', (req, res) => {
@@ -21,12 +22,13 @@ router.get('/categories', (req, res) => {
 
 // GET /api/tasks
 router.get('/', (req, res) => {
-  const { category, topicId, levelId, projectId } = req.query;
+  const { category, topicId, levelId, projectId, datasetKey } = req.query;
   let list = tasks;
-  if (category)  list = list.filter(t => t.category  === category);
-  if (topicId)   list = list.filter(t => t.topicId   === topicId);
-  if (levelId)   list = list.filter(t => t.levelId   === levelId);
-  if (projectId) list = list.filter(t => t.projectId === projectId);
+  if (datasetKey) list = list.filter(t => t.datasetKey === datasetKey);
+  if (category)   list = list.filter(t => t.category  === category);
+  if (topicId)    list = list.filter(t => t.topicId   === topicId);
+  if (levelId)    list = list.filter(t => t.levelId   === levelId);
+  if (projectId)  list = list.filter(t => t.projectId === projectId);
   res.json(list.map(({ solution, ...rest }) => rest));
 });
 
@@ -69,21 +71,40 @@ router.post('/:id/check', async (req, res) => {
     }
   }
 
+  // Resolve dataset for the session — determines schema and enables dataset validation.
+  const dataset    = await getDatasetBySessionId(resolvedSessionId);
+  const schemaName = dataset?.schema_name || 'academic';
+
+  // Reject if the task belongs to a different dataset than the session.
+  if (task.datasetKey && dataset?.key && task.datasetKey !== dataset.key) {
+    return res.status(400).json({
+      error: `This task belongs to the "${task.datasetKey}" dataset but your session uses "${dataset.key}".`,
+    });
+  }
+
   const safetyCheck = validateSqlSafety(userSql);
   if (!safetyCheck.safe) {
     await saveCheckAttempt(resolvedUserId, resolvedSessionId, task.id, userSql, null, safetyCheck.reason);
     return res.status(403).json({ error: safetyCheck.reason });
   }
 
+  // Cross-schema guard
+  const allSchemas = await getAllDatasetSchemaNames();
+  const scopeCheck = validateSchemaScope(userSql, schemaName, allSchemas);
+  if (!scopeCheck.safe) {
+    await saveCheckAttempt(resolvedUserId, resolvedSessionId, task.id, userSql, null, scopeCheck.reason);
+    return res.status(403).json({ error: scopeCheck.reason });
+  }
+
   let userResult;
   let solutionResult;
 
   try {
-    // User SQL runs with a timeout guard on a dedicated client.
-    // Solution SQL is trusted and runs on the shared pool — no cap, no timeout.
+    // User SQL runs with timeout guard + search_path on a dedicated client.
+    // Solution SQL is trusted — no timeout, but same search_path for correctness.
     [userResult, solutionResult] = await Promise.all([
-      executeUserQuery(userSql),
-      pool.query(task.solution),
+      executeUserQuery(userSql, schemaName),
+      executeSolutionQuery(task.solution, schemaName),
     ]);
   } catch (err) {
     const msg = err.code === '57014'
@@ -94,8 +115,6 @@ router.post('/:id/check', async (req, res) => {
   }
 
   // Row limit check — must run BEFORE compareResults.
-  // If the user's query returns too many rows we cannot compare results safely,
-  // and returning partial rows would risk a false-positive match.
   if (userResult.rowCount > ROW_LIMIT) {
     const msg = `Your query returns more than ${ROW_LIMIT} rows. The expected result has ${solutionResult.rowCount} rows. Add a more specific filter or a LIMIT clause.`;
     await saveCheckAttempt(resolvedUserId, resolvedSessionId, task.id, userSql, null, msg);
@@ -105,9 +124,6 @@ router.post('/:id/check', async (req, res) => {
   const orderMatters = solutionHasTopLevelOrderBy(task.solution);
   const comparison = compareResults(userResult, solutionResult, { orderMatters });
 
-  // Global ORDER BY presence check — runs for all topics.
-  // Catches cases where results coincidentally match even though the user omitted
-  // a required ORDER BY (e.g. all rows have the same sort-key value).
   if (comparison.isCorrect) {
     const requiredOrderCheck = validateRequiredOrderBy(userSql, task.solution, task);
     if (!requiredOrderCheck.isStructurallyValid) {
@@ -128,9 +144,6 @@ router.post('/:id/check', async (req, res) => {
     }
   }
 
-  // Structural validation — only for strict-mode tasks, only when results already match.
-  // Catches queries that return the right rows on the current dataset but use logically
-  // different SQL (e.g. over-constrained WHERE, extra LIMIT, unsolicited DISTINCT).
   const validationMode =
     task.validationMode ??
     (['select', 'where'].includes(task.topicId) ? 'strict' : 'result_only');

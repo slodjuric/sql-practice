@@ -1,6 +1,42 @@
 const pool = require('./db');
 
 async function initDb() {
+  // Migration: drop legacy practice tables from public schema.
+  // These were moved to the academic schema (npm run db:init).
+  // Drop is safe and idempotent — CASCADE handles foreign-key order.
+  await pool.query(`
+    DROP TABLE IF EXISTS public.exams              CASCADE;
+    DROP TABLE IF EXISTS public.professor_subjects CASCADE;
+    DROP TABLE IF EXISTS public.students           CASCADE;
+    DROP TABLE IF EXISTS public.professors         CASCADE;
+    DROP TABLE IF EXISTS public.subjects           CASCADE;
+    DROP TABLE IF EXISTS public.departments        CASCADE;
+    DROP TABLE IF EXISTS public.faculties          CASCADE;
+  `);
+
+  // ── Datasets registry ────────────────────────────────────────────────────
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS datasets (
+      id          SERIAL PRIMARY KEY,
+      key         VARCHAR(50) UNIQUE NOT NULL,
+      name        TEXT NOT NULL,
+      schema_name VARCHAR(50) NOT NULL,
+      description TEXT,
+      type        VARCHAR(20) NOT NULL DEFAULT 'official',
+      is_active   BOOLEAN NOT NULL DEFAULT true,
+      created_by  INTEGER NULL,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await pool.query(`
+    INSERT INTO datasets (key, name, schema_name, description, type)
+    VALUES ('academic', 'Academic', 'academic',
+            'University practice dataset with faculties, departments, professors, subjects, students and exams',
+            'official')
+    ON CONFLICT (key) DO NOTHING
+  `);
+
   // ── Users ────────────────────────────────────────────────────────────────
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -139,6 +175,19 @@ async function initDb() {
   `);
   await pool.query(`
     UPDATE learning_sessions SET plan_type = 'topic' WHERE plan_type IS NULL
+  `);
+
+  // Migration: add dataset_id to learning_sessions
+  await pool.query(`
+    ALTER TABLE learning_sessions
+    ADD COLUMN IF NOT EXISTS dataset_id INTEGER REFERENCES datasets(id)
+  `);
+
+  // Backfill: assign all existing sessions to the academic dataset
+  await pool.query(`
+    UPDATE learning_sessions
+    SET dataset_id = (SELECT id FROM datasets WHERE key = 'academic')
+    WHERE dataset_id IS NULL
   `);
 
   // Migration: replace old status CHECK ('active','locked') with ('active','completed')

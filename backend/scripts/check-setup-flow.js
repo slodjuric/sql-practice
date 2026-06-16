@@ -4,7 +4,7 @@
  * End-to-end setup flow verification.
  *
  * Tests the full sequence a new user would follow:
- *   1.  npm run db:init  →  7 practice tables created + populated
+ *   1.  npm run db:init  →  academic schema + 7 practice tables created + populated
  *   2.  server start     →  5 progress tables created by initDb.js
  *   3.  create user      →  user saved to DB
  *   4.  create session   →  session saved to DB
@@ -22,7 +22,7 @@ const path    = require('path');
 const { Client, Pool } = require('pg');
 require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 
-const SQL_FILE = path.resolve(__dirname, '../db/init-practice-db.sql');
+const SQL_FILE = path.resolve(__dirname, '../db/schemas/academic.sql');
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -52,6 +52,28 @@ async function runSqlFile(client) {
 // no seed data.  Must stay in sync structurally with src/initDb.js.
 async function runInitDb(pool) {
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS datasets (
+      id          SERIAL PRIMARY KEY,
+      key         VARCHAR(50) UNIQUE NOT NULL,
+      name        TEXT NOT NULL,
+      schema_name VARCHAR(50) NOT NULL,
+      description TEXT,
+      type        VARCHAR(20) NOT NULL DEFAULT 'official',
+      is_active   BOOLEAN NOT NULL DEFAULT true,
+      created_by  INTEGER NULL,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await pool.query(`
+    INSERT INTO datasets (key, name, schema_name, description, type)
+    VALUES ('academic', 'Academic', 'academic',
+            'University practice dataset with faculties, departments, professors, subjects, students and exams',
+            'official')
+    ON CONFLICT (key) DO NOTHING
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id         SERIAL PRIMARY KEY,
       username   VARCHAR(50) UNIQUE NOT NULL,
@@ -65,6 +87,7 @@ async function runInitDb(pool) {
       name           TEXT NOT NULL,
       description    TEXT,
       plan_type      VARCHAR(20) DEFAULT 'topic',
+      dataset_id     INTEGER REFERENCES datasets(id),
       status         TEXT NOT NULL DEFAULT 'active'
                        CHECK (status IN ('active', 'completed')),
       created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -126,13 +149,13 @@ async function run() {
     console.log('\n── Step 1: db:init on fresh empty database ──');
     try {
       await runSqlFile(client);
-      pass('01', 'init-practice-db.sql executed without error');
+      pass('01', 'academic.sql executed without error');
     } catch (err) {
-      fail('01', 'init-practice-db.sql executed', err.message);
+      fail('01', 'academic.sql executed', err.message);
     }
 
     // ── Step 2: Verify 7 practice tables + row counts ────────────────────────
-    console.log('\n── Step 2: Verify practice table row counts ──');
+    console.log('\n── Step 2: Verify practice table row counts (academic schema) ──');
     const expected = {
       faculties:          6,
       departments:       17,
@@ -144,15 +167,15 @@ async function run() {
     };
     for (const [table, count] of Object.entries(expected)) {
       try {
-        const r = await client.query(`SELECT COUNT(*) AS n FROM ${table}`);
+        const r = await client.query(`SELECT COUNT(*) AS n FROM academic.${table}`);
         const got = parseInt(r.rows[0].n, 10);
         if (got === count) {
-          pass(`02-${table}`, `${table}: ${got} rows`);
+          pass(`02-${table}`, `academic.${table}: ${got} rows`);
         } else {
-          fail(`02-${table}`, `${table} row count`, `expected ${count}, got ${got}`);
+          fail(`02-${table}`, `academic.${table} row count`, `expected ${count}, got ${got}`);
         }
       } catch (err) {
-        fail(`02-${table}`, `${table} exists`, err.message);
+        fail(`02-${table}`, `academic.${table} exists`, err.message);
       }
     }
 
@@ -165,7 +188,7 @@ async function run() {
       fail('03', 'Progress tables created', err.message);
     }
 
-    const progressTables = ['users','learning_sessions','learning_session_filters','task_attempts','user_task_progress'];
+    const progressTables = ['datasets','users','learning_sessions','learning_session_filters','task_attempts','user_task_progress'];
     for (const table of progressTables) {
       try {
         await client.query(`SELECT 1 FROM ${table} LIMIT 1`);
@@ -192,13 +215,15 @@ async function run() {
     console.log('\n── Step 5: Create learning session ──');
     let sessionId;
     try {
+      const datasetRow = await client.query(`SELECT id FROM datasets WHERE key = 'academic'`);
+      const datasetId  = datasetRow.rows[0]?.id;
       const r = await client.query(
-        `INSERT INTO learning_sessions (user_id, name, plan_type)
-         VALUES ($1, 'Test Session', 'topic') RETURNING id`,
-        [userId]
+        `INSERT INTO learning_sessions (user_id, name, plan_type, dataset_id)
+         VALUES ($1, 'Test Session', 'topic', $2) RETURNING id`,
+        [userId, datasetId]
       );
       sessionId = r.rows[0].id;
-      pass('05', `Session created (id=${sessionId})`);
+      pass('05', `Session created (id=${sessionId}, dataset_id=${datasetId})`);
     } catch (err) {
       fail('05', 'Session created', err.message);
     }
@@ -250,24 +275,24 @@ async function run() {
     console.log('\n── Step 8: db:init again — verify isolation ──');
     try {
       await runSqlFile(client);
-      pass('08', 'Second db:init executed without error');
+      pass('08', 'Second academic.sql executed without error');
     } catch (err) {
-      fail('08', 'Second db:init executed', err.message);
+      fail('08', 'Second academic.sql executed', err.message);
     }
 
     // ── Step 9: Verify practice tables reset ─────────────────────────────────
     console.log('\n── Step 9: Practice tables reset correctly ──');
     for (const [table, count] of Object.entries(expected)) {
       try {
-        const r = await client.query(`SELECT COUNT(*) AS n FROM ${table}`);
+        const r = await client.query(`SELECT COUNT(*) AS n FROM academic.${table}`);
         const got = parseInt(r.rows[0].n, 10);
         if (got === count) {
-          pass(`09-${table}`, `${table} reset to ${count} rows`);
+          pass(`09-${table}`, `academic.${table} reset to ${count} rows`);
         } else {
-          fail(`09-${table}`, `${table} reset`, `expected ${count}, got ${got}`);
+          fail(`09-${table}`, `academic.${table} reset`, `expected ${count}, got ${got}`);
         }
       } catch (err) {
-        fail(`09-${table}`, `${table} still accessible`, err.message);
+        fail(`09-${table}`, `academic.${table} still accessible`, err.message);
       }
     }
 
@@ -318,6 +343,22 @@ async function run() {
       }
     } catch (err) {
       fail('10-progress', 'user_task_progress table accessible', err.message);
+    }
+
+    // ── Step 11: Verify search_path scoping ──────────────────────────────────
+    console.log('\n── Step 11: search_path scoping ──');
+    try {
+      await client.query(`SET search_path = academic, pg_catalog`);
+      const r = await client.query(`SELECT COUNT(*) AS n FROM students`);
+      const got = parseInt(r.rows[0].n, 10);
+      if (got === 90) {
+        pass('11', 'Unqualified SELECT * FROM students works with search_path = academic');
+      } else {
+        fail('11', 'Unqualified students count', `expected 90, got ${got}`);
+      }
+      await client.query(`SET search_path = public, pg_catalog`);
+    } catch (err) {
+      fail('11', 'search_path scoping', err.message);
     }
 
   } finally {

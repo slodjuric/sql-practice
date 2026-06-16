@@ -3,6 +3,7 @@ const router = express.Router();
 const pool = require('../db');
 const tasks = require('../data/tasks.json');
 const { matchesSessionFilters, getSessionFilters } = require('../utils/taskFilters');
+const { getDatasetByKey } = require('../utils/datasetResolver');
 
 async function insertSessionFilters(client, sessionId, { topics = [], difficulties = [], projects = [], categories = [] } = {}) {
   const rows = [
@@ -21,6 +22,20 @@ async function insertSessionFilters(client, sessionId, { topics = [], difficulti
   );
 }
 
+// Resolves the dataset_id to use for a new session.
+// Accepts an explicit datasetId (integer), falls back to the academic dataset.
+async function resolveDatasetId(providedDatasetId) {
+  if (providedDatasetId) {
+    const id = parseInt(providedDatasetId, 10);
+    if (!isNaN(id)) {
+      const res = await pool.query('SELECT id FROM datasets WHERE id = $1 AND is_active = true', [id]);
+      if (res.rows[0]) return id;
+    }
+  }
+  const academic = await getDatasetByKey('academic');
+  return academic?.id || null;
+}
+
 // GET /api/sessions?userId=2
 router.get('/', async (req, res) => {
   const uid = parseInt(req.query.userId, 10);
@@ -29,7 +44,15 @@ router.get('/', async (req, res) => {
   }
   try {
     const result = await pool.query(
-      'SELECT * FROM learning_sessions WHERE user_id = $1 ORDER BY created_at ASC',
+      `SELECT ls.*,
+              d.key  AS dataset_key,
+              d.name AS dataset_name,
+              d.schema_name,
+              d.type AS dataset_type
+       FROM learning_sessions ls
+       LEFT JOIN datasets d ON d.id = ls.dataset_id
+       WHERE ls.user_id = $1
+       ORDER BY ls.created_at ASC`,
       [uid]
     );
     res.json(result.rows);
@@ -40,7 +63,7 @@ router.get('/', async (req, res) => {
 
 // POST /api/sessions
 router.post('/', async (req, res) => {
-  const { userId, name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [] } = req.body;
+  const { userId, name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [], datasetId } = req.body;
   const uid = parseInt(userId, 10);
   if (!userId || isNaN(uid)) return res.status(400).json({ error: 'userId is required.' });
   if (!name || typeof name !== 'string' || !name.trim()) {
@@ -50,15 +73,26 @@ router.post('/', async (req, res) => {
   const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [uid]);
   if (userCheck.rows.length === 0) return res.status(404).json({ error: 'User not found.' });
 
+  const resolvedDatasetId = await resolveDatasetId(datasetId);
+  if (!resolvedDatasetId) return res.status(400).json({ error: 'No active dataset found.' });
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const result = await client.query(
-      'INSERT INTO learning_sessions (user_id, name, description, plan_type) VALUES ($1, $2, $3, $4) RETURNING *',
-      [uid, name.trim(), description?.trim() || null, planType]
+      `INSERT INTO learning_sessions (user_id, name, description, plan_type, dataset_id)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [uid, name.trim(), description?.trim() || null, planType, resolvedDatasetId]
     );
     const session = result.rows[0];
+
+    // Attach dataset fields to the returned session object
+    const datasetRow = await client.query(
+      'SELECT key AS dataset_key, name AS dataset_name, schema_name, type AS dataset_type FROM datasets WHERE id = $1',
+      [resolvedDatasetId]
+    );
+    const sessionWithDataset = { ...session, ...datasetRow.rows[0] };
 
     const topicArr    = Array.isArray(topics)       ? topics       : [];
     const diffArr     = Array.isArray(difficulties)  ? difficulties : [];
@@ -69,9 +103,9 @@ router.post('/', async (req, res) => {
 
     await client.query('COMMIT');
     res.status(201).json({
-      session,
+      session: sessionWithDataset,
       filters: {
-        planType:     planType,
+        planType,
         topics:       topicArr,
         difficulties: diffArr,
         projects:     projectArr,
@@ -90,6 +124,7 @@ router.post('/', async (req, res) => {
 });
 
 // PATCH /api/sessions/:id — update name, description and replace filters
+// dataset_id is intentionally NOT editable after session creation.
 router.patch('/:id', async (req, res) => {
   const sid = parseInt(req.params.id, 10);
   const { userId, name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [] } = req.body;
@@ -97,7 +132,7 @@ router.patch('/:id', async (req, res) => {
 
   if (!userId || isNaN(uid)) return res.status(400).json({ error: 'userId is required.' });
   if (!name || typeof name !== 'string' || !name.trim()) {
-    return res.status(400).json({ error: 'Plan name is required.' });
+    return res.status(400).json({ error: 'Session name is required.' });
   }
 
   const client = await pool.connect();
@@ -119,6 +154,16 @@ router.patch('/:id', async (req, res) => {
     );
     const session = result.rows[0];
 
+    // Attach current dataset fields
+    const datasetRow = await client.query(
+      `SELECT d.key AS dataset_key, d.name AS dataset_name, d.schema_name, d.type AS dataset_type
+       FROM datasets d
+       JOIN learning_sessions ls ON ls.dataset_id = d.id
+       WHERE ls.id = $1`,
+      [sid]
+    );
+    const sessionWithDataset = { ...session, ...datasetRow.rows[0] };
+
     await client.query('DELETE FROM learning_session_filters WHERE session_id = $1', [sid]);
 
     const topicArr    = Array.isArray(topics)       ? topics       : [];
@@ -129,7 +174,10 @@ router.patch('/:id', async (req, res) => {
     await insertSessionFilters(client, sid, { topics: topicArr, difficulties: diffArr, projects: projectArr, categories: categoryArr });
 
     await client.query('COMMIT');
-    res.json({ session, filters: { planType, topics: topicArr, difficulties: diffArr, projects: projectArr, categories: categoryArr } });
+    res.json({
+      session: sessionWithDataset,
+      filters: { planType, topics: topicArr, difficulties: diffArr, projects: projectArr, categories: categoryArr },
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     if (err.code === '23505') {

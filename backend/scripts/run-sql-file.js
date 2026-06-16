@@ -11,7 +11,7 @@ const path = require('path');
 const { Client } = require('pg');
 require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 
-const DEFAULT_SQL = path.resolve(__dirname, '../db/init-practice-db.sql');
+const DEFAULT_SQL = path.resolve(__dirname, '../db/schemas/academic.sql');
 const sqlFile = process.argv[2] ? path.resolve(process.argv[2]) : DEFAULT_SQL;
 
 async function main() {
