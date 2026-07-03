@@ -70,6 +70,14 @@ async function initDb() {
     END $$;
   `);
 
+  // Migration: add password_hash to users — nullable, no default, no backfill.
+  // Existing accounts stay password-less until set explicitly via
+  // scripts/set-user-password.js; real login does not exist yet.
+  await pool.query(`
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS password_hash TEXT
+  `);
+
   await pool.query(`
     INSERT INTO users (username) VALUES ('default')
     ON CONFLICT (username) DO NOTHING
