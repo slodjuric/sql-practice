@@ -54,7 +54,7 @@ export default function QueryPlayground({ tableToOpen, onTableOpened, activeUser
     setResult(null);
     setPreviewVisible(false);
     try {
-      const data = await api.query(sql, null, activeUser?.id, activeSession?.id);
+      const data = await api.query(sql, null, activeSession?.id);
       setResult(data);
     } catch (err) {
       setError(getFriendlySqlErrorMessage(err.message, sql, 'playground'));

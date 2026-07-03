@@ -124,12 +124,12 @@ export default function PracticeView({
   // ── Status loading ─────────────────────────────────────────
   const loadStatuses = useCallback(async () => {
     try {
-      const data = await api.progress.taskStatuses(activeUser?.id, activeSession?.id);
+      const data = await api.progress.taskStatuses(activeSession?.id);
       setTaskStatuses(data.statuses || {});
     } catch {
       // statuses are optional — don't break the practice flow
     }
-  }, [activeUser, activeSession]);
+  }, [activeSession]);
 
   // Reload statuses when entering a category list
   useEffect(() => {

@@ -2,9 +2,10 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db');
 const { tasks, taskMap } = require('../data/taskRegistry');
-const { resolveUserId, resolveSessionId } = require('../utils/contextResolvers');
+const { resolveSessionId } = require('../utils/contextResolvers');
 const { matchesSessionFilters, getSessionFilters } = require('../utils/taskFilters');
 const { getDatasetBySessionId } = require('../utils/datasetResolver');
+const { getActingUser } = require('../utils/authz');
 
 const PROJECT_LABELS = {
   'student-performance': 'Student Performance Analysis',
@@ -59,13 +60,20 @@ function buildGroupStats(taskList, progressMap, planType) {
   return Object.values(groups).map(g => ({ ...g, notStarted: g.total - g.solved - g.inProgress }));
 }
 
-// GET /api/progress/summary?userId=2&sessionId=5
+// GET /api/progress/summary?sessionId=5
+// userId always comes from the authenticated session — never from the client.
 router.get('/summary', async (req, res) => {
   try {
-    const userId    = await resolveUserId(req.query.userId);
-    const sessionId = await resolveSessionId(userId, req.query.sessionId);
+    const actingUser = await getActingUser(req);
+    if (!actingUser) {
+      return res.status(401).json({ error: 'Not authenticated.' });
+    }
 
-    if (!userId || !sessionId) {
+    // resolveSessionId verifies the provided sessionId actually belongs to
+    // actingUser (or picks their first session if none was provided).
+    const sessionId = await resolveSessionId(actingUser.id, req.query.sessionId);
+
+    if (!sessionId) {
       const academicTasks = tasks.filter(t => !t.datasetKey || t.datasetKey === 'academic');
       return res.json({
         totalTasks: academicTasks.length,
@@ -84,7 +92,7 @@ router.get('/summary', async (req, res) => {
         SELECT task_id, status, attempts_count
         FROM user_task_progress
         WHERE user_id = $1 AND session_id = $2
-      `, [userId, sessionId]),
+      `, [actingUser.id, sessionId]),
       // task_attempts — check answer history only (is_correct IS NOT NULL excludes Run Query rows)
       pool.query(`
         SELECT task_id, is_correct, created_at, submitted_sql
@@ -92,7 +100,7 @@ router.get('/summary', async (req, res) => {
         WHERE user_id = $1 AND session_id = $2
           AND is_correct IS NOT NULL
         ORDER BY created_at DESC
-      `, [userId, sessionId]),
+      `, [actingUser.id, sessionId]),
       getSessionFilters(sessionId),
       getDatasetBySessionId(sessionId),
     ]);
@@ -158,20 +166,24 @@ router.get('/summary', async (req, res) => {
   }
 });
 
-// GET /api/progress/tasks-status?userId=2&sessionId=5
+// GET /api/progress/tasks-status?sessionId=5
+// userId always comes from the authenticated session — never from the client.
 router.get('/tasks-status', async (req, res) => {
   try {
-    const userId    = await resolveUserId(req.query.userId);
-    const sessionId = await resolveSessionId(userId, req.query.sessionId);
+    const actingUser = await getActingUser(req);
+    if (!actingUser) {
+      return res.status(401).json({ error: 'Not authenticated.' });
+    }
 
-    if (!userId || !sessionId) return res.json({ statuses: {} });
+    const sessionId = await resolveSessionId(actingUser.id, req.query.sessionId);
+    if (!sessionId) return res.json({ statuses: {} });
 
     // user_task_progress = current task status source of truth
     const result = await pool.query(`
       SELECT task_id, status
       FROM user_task_progress
       WHERE user_id = $1 AND session_id = $2
-    `, [userId, sessionId]);
+    `, [actingUser.id, sessionId]);
 
     const statuses = {};
     for (const row of result.rows) statuses[row.task_id] = row.status;

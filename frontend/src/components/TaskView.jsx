@@ -289,7 +289,7 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
     setShowSolution(false);
     setPreviewVisible(false);
     try {
-      const data = await api.query(sql, taskId, activeUser?.id, activeSession?.id);
+      const data = await api.query(sql, taskId, activeSession?.id);
       setResult(data);
       onExecutionCacheUpdate?.(taskId, { sql, result: data, error: null });
       if (localStatus !== 'solved') {
@@ -318,7 +318,7 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
     setError(null);
     setCheckResult(null);
     try {
-      const data = await api.tasks.check(taskId, sql, activeUser?.id, activeSession?.id);
+      const data = await api.tasks.check(taskId, sql, activeSession?.id);
       setResult(data.userResult);
       setCheckResult(data);
       onProgressInvalidate?.();

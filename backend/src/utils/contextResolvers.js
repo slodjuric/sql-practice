@@ -1,14 +1,7 @@
 const pool = require('../db');
 
-async function resolveUserId(provided) {
-  if (provided !== undefined && provided !== null && provided !== '') {
-    const id = parseInt(provided, 10);
-    if (!isNaN(id)) return id;
-  }
-  const res = await pool.query("SELECT id FROM users WHERE username = 'default' LIMIT 1");
-  return res.rows[0]?.id ?? null;
-}
-
+// userId is always the authenticated actingUser.id (see utils/authz.js) —
+// resolveUserId was retired once every call site switched to real sessions.
 async function resolveSessionId(userId, provided) {
   if (provided !== undefined && provided !== null && provided !== '') {
     const id = parseInt(provided, 10);
@@ -30,4 +23,4 @@ async function resolveSessionId(userId, provided) {
   return res.rows[0]?.id ?? null;
 }
 
-module.exports = { resolveUserId, resolveSessionId };
+module.exports = { resolveSessionId };

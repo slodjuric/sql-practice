@@ -5,7 +5,9 @@ const { VALID_ROLES, isValidRole } = require('../utils/roleValidator');
 const { requireRole } = require('../utils/authz');
 
 // GET /api/users
-router.get('/', async (req, res) => {
+// Admin-only. Acting user is resolved from the authenticated session
+// (see utils/authz.js).
+router.get('/', requireRole('admin'), async (req, res) => {
   try {
     const result = await pool.query(
       'SELECT id, username, role, created_at FROM users ORDER BY created_at ASC'
@@ -17,7 +19,8 @@ router.get('/', async (req, res) => {
 });
 
 // POST /api/users
-router.post('/', async (req, res) => {
+// Admin-only — account creation is an admin action, not public registration.
+router.post('/', requireRole('admin'), async (req, res) => {
   const { username, role } = req.body;
   if (!username || typeof username !== 'string' || !username.trim()) {
     return res.status(400).json({ error: 'Username is required.' });
@@ -47,8 +50,8 @@ router.post('/', async (req, res) => {
 });
 
 // DELETE /api/users/:id
-// Admin-only. Acting user is resolved via the temporary x-acting-user-id
-// header (see utils/authz.js) until real login/auth exists.
+// Admin-only. Acting user is resolved from the authenticated session
+// (see utils/authz.js).
 router.delete('/:id', requireRole('admin'), async (req, res) => {
   const userId = parseInt(req.params.id, 10);
   if (!userId || isNaN(userId)) {

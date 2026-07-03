@@ -1,29 +1,33 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db');
-const { resolveUserId, resolveSessionId } = require('../utils/contextResolvers');
+const { resolveSessionId } = require('../utils/contextResolvers');
 const { saveRunAttempt } = require('../utils/attemptRecorder');
 const { validateSqlSafety, validateSchemaScope } = require('../utils/sqlSafetyValidator');
 const { executeUserQuery, ROW_LIMIT, QUERY_TIMEOUT } = require('../utils/queryRunner');
 const { getSchemaNameBySessionId, getAllDatasetSchemaNames } = require('../utils/datasetResolver');
+const { getActingUser } = require('../utils/authz');
 
 // POST /api/query — run a SELECT query
+// userId always comes from the authenticated session — never from the client.
+// Only the attempt-recording path (taskId present) requires login; the
+// free-form playground (no taskId, nothing recorded) does not.
 router.post('/', async (req, res) => {
-  const { sql, taskId, userId, sessionId } = req.body;
+  const { sql, taskId, sessionId } = req.body;
 
   if (!sql || typeof sql !== 'string' || !sql.trim()) {
     return res.status(400).json({ error: 'SQL query is required.' });
   }
 
-  let resolvedUserId    = null;
-  let resolvedSessionId = null;
-
-  // Always resolve session when userId or sessionId is provided — not only for task runs.
-  // This ensures the correct dataset schema is used for free-form playground queries too.
-  if (userId || sessionId) {
-    resolvedUserId    = await resolveUserId(userId);
-    resolvedSessionId = await resolveSessionId(resolvedUserId, sessionId);
+  const actingUser = await getActingUser(req);
+  if (taskId && !actingUser) {
+    return res.status(401).json({ error: 'Not authenticated.' });
   }
+
+  // resolveSessionId verifies the provided sessionId actually belongs to
+  // actingUser (or picks their first session if none was provided).
+  const resolvedUserId    = actingUser?.id ?? null;
+  const resolvedSessionId = actingUser ? await resolveSessionId(actingUser.id, sessionId) : null;
 
   // Completed-session guard applies only to task runs (Run Query button on a task),
   // not to the free-form playground where no attempts are recorded.

@@ -410,11 +410,11 @@ export default function ProgressView({ activeUser, activeSession, sessionFilters
   const load = useCallback(() => {
     setLoading(true);
     setError(null);
-    api.progress.summary(activeUser?.id, activeSession?.id)
+    api.progress.summary(activeSession?.id)
       .then(setSummary)
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
-  }, [activeUser, activeSession, progressVersion]);
+  }, [activeSession, progressVersion]);
 
   useEffect(() => { load(); }, [load]);
 

@@ -37,11 +37,12 @@ async function resolveDatasetId(providedDatasetId) {
   return academic?.id || null;
 }
 
-// GET /api/sessions?userId=2
+// GET /api/sessions
+// userId always comes from the authenticated session — never from the client.
 router.get('/', async (req, res) => {
-  const uid = parseInt(req.query.userId, 10);
-  if (!req.query.userId || isNaN(uid)) {
-    return res.status(400).json({ error: 'userId is required.' });
+  const actingUser = await getActingUser(req);
+  if (!actingUser) {
+    return res.status(401).json({ error: 'Not authenticated.' });
   }
   try {
     const result = await pool.query(
@@ -54,7 +55,7 @@ router.get('/', async (req, res) => {
        LEFT JOIN datasets d ON d.id = ls.dataset_id
        WHERE ls.user_id = $1
        ORDER BY ls.created_at ASC`,
-      [uid]
+      [actingUser.id]
     );
     res.json(result.rows);
   } catch (err) {
@@ -63,16 +64,17 @@ router.get('/', async (req, res) => {
 });
 
 // POST /api/sessions
+// userId always comes from the authenticated session — never from the client.
 router.post('/', async (req, res) => {
-  const { userId, name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [], datasetId } = req.body;
-  const uid = parseInt(userId, 10);
-  if (!userId || isNaN(uid)) return res.status(400).json({ error: 'userId is required.' });
+  const actingUser = await getActingUser(req);
+  if (!actingUser) {
+    return res.status(401).json({ error: 'Not authenticated.' });
+  }
+
+  const { name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [], datasetId } = req.body;
   if (!name || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'Session name is required.' });
   }
-
-  const userCheck = await pool.query('SELECT id FROM users WHERE id = $1', [uid]);
-  if (userCheck.rows.length === 0) return res.status(404).json({ error: 'User not found.' });
 
   const resolvedDatasetId = await resolveDatasetId(datasetId);
   if (!resolvedDatasetId) return res.status(400).json({ error: 'No active dataset found.' });
@@ -84,7 +86,7 @@ router.post('/', async (req, res) => {
     const result = await client.query(
       `INSERT INTO learning_sessions (user_id, name, description, plan_type, dataset_id)
        VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [uid, name.trim(), description?.trim() || null, planType, resolvedDatasetId]
+      [actingUser.id, name.trim(), description?.trim() || null, planType, resolvedDatasetId]
     );
     const session = result.rows[0];
 
@@ -126,12 +128,16 @@ router.post('/', async (req, res) => {
 
 // PATCH /api/sessions/:id — update name, description and replace filters
 // dataset_id is intentionally NOT editable after session creation.
+// userId always comes from the authenticated session — never from the client.
 router.patch('/:id', async (req, res) => {
   const sid = parseInt(req.params.id, 10);
-  const { userId, name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [] } = req.body;
-  const uid = parseInt(userId, 10);
 
-  if (!userId || isNaN(uid)) return res.status(400).json({ error: 'userId is required.' });
+  const actingUser = await getActingUser(req);
+  if (!actingUser) {
+    return res.status(401).json({ error: 'Not authenticated.' });
+  }
+
+  const { name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [] } = req.body;
   if (!name || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'Session name is required.' });
   }
@@ -142,7 +148,7 @@ router.patch('/:id', async (req, res) => {
 
     const check = await client.query(
       'SELECT id FROM learning_sessions WHERE id = $1 AND user_id = $2',
-      [sid, uid]
+      [sid, actingUser.id]
     );
     if (check.rows.length === 0) {
       await client.query('ROLLBACK');
@@ -191,20 +197,34 @@ router.patch('/:id', async (req, res) => {
 });
 
 // GET /api/sessions/:id/filters
+// Requires login; a nonexistent session and another user's session both
+// return 404 (no distinction), so a session id can't be used to probe
+// whether it exists but belongs to someone else.
 router.get('/:id/filters', async (req, res) => {
   const sid = parseInt(req.params.id, 10);
+
+  const actingUser = await getActingUser(req);
+  if (!actingUser) {
+    return res.status(401).json({ error: 'Not authenticated.' });
+  }
+
   try {
-    const [filtersRes, sessionRes] = await Promise.all([
-      pool.query(
-        `SELECT filter_type, filter_value
-         FROM learning_session_filters
-         WHERE session_id = $1
-         ORDER BY filter_type, filter_value`,
-        [sid]
-      ),
-      pool.query('SELECT plan_type FROM learning_sessions WHERE id = $1', [sid]),
-    ]);
-    const planType     = sessionRes.rows[0]?.plan_type ?? 'topic';
+    const sessionRes = await pool.query(
+      'SELECT plan_type FROM learning_sessions WHERE id = $1 AND user_id = $2',
+      [sid, actingUser.id]
+    );
+    if (sessionRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Session not found.' });
+    }
+
+    const filtersRes = await pool.query(
+      `SELECT filter_type, filter_value
+       FROM learning_session_filters
+       WHERE session_id = $1
+       ORDER BY filter_type, filter_value`,
+      [sid]
+    );
+    const planType     = sessionRes.rows[0].plan_type ?? 'topic';
     const topics       = filtersRes.rows.filter(r => r.filter_type === 'topic').map(r => r.filter_value);
     const difficulties = filtersRes.rows.filter(r => r.filter_type === 'difficulty').map(r => r.filter_value);
     const projects     = filtersRes.rows.filter(r => r.filter_type === 'project').map(r => r.filter_value);
@@ -216,14 +236,19 @@ router.get('/:id/filters', async (req, res) => {
 });
 
 // PATCH /api/sessions/:id/complete  — marks session as completed (read-only, finalized)
+// userId always comes from the authenticated session — never from the client.
 router.patch('/:id/complete', async (req, res) => {
   const sid = parseInt(req.params.id, 10);
-  const uid = parseInt(req.body.userId, 10);
-  if (!req.body.userId || isNaN(uid)) return res.status(400).json({ error: 'userId is required.' });
+
+  const actingUser = await getActingUser(req);
+  if (!actingUser) {
+    return res.status(401).json({ error: 'Not authenticated.' });
+  }
+
   try {
     const sessionCheck = await pool.query(
       'SELECT id FROM learning_sessions WHERE id = $1 AND user_id = $2',
-      [sid, uid]
+      [sid, actingUser.id]
     );
     if (sessionCheck.rows.length === 0) return res.status(404).json({ error: 'Session not found.' });
 
@@ -232,7 +257,7 @@ router.patch('/:id/complete', async (req, res) => {
       getSessionFilters(sid),
       pool.query(
         'SELECT task_id, status FROM user_task_progress WHERE user_id = $1 AND session_id = $2',
-        [uid, sid]
+        [actingUser.id, sid]
       ),
       getDatasetBySessionId(sid),
     ]);
@@ -252,7 +277,7 @@ router.patch('/:id/complete', async (req, res) => {
        SET status = 'completed', completed_at = NOW()
        WHERE id = $1 AND user_id = $2
        RETURNING *`,
-      [sid, uid]
+      [sid, actingUser.id]
     );
     if (!result.rows[0]) return res.status(500).json({ error: 'Session update failed.' });
     res.json(result.rows[0]);
@@ -262,9 +287,8 @@ router.patch('/:id/complete', async (req, res) => {
 });
 
 // PATCH /api/sessions/:id/reopen  — reopens a completed session back to active
-// Acting user is resolved via the temporary x-acting-user-id header (see
-// utils/authz.js) until real login/auth exists. Permission is enforced by
-// canReopenSession — students can never reopen, even their own session;
+// Acting user is resolved from the authenticated session (see utils/authz.js).
+// Permission is enforced by canReopenSession — students can never reopen, even their own session;
 // backend is the source of truth here, not the frontend button state.
 router.patch('/:id/reopen', async (req, res) => {
   const sid = parseInt(req.params.id, 10);
@@ -310,14 +334,19 @@ router.patch('/:id/reopen', async (req, res) => {
 });
 
 // PATCH /api/sessions/:id/open
+// userId always comes from the authenticated session — never from the client.
 router.patch('/:id/open', async (req, res) => {
   const sid = parseInt(req.params.id, 10);
-  const uid = parseInt(req.body?.userId, 10);
-  if (!req.body?.userId || isNaN(uid)) return res.status(400).json({ error: 'userId is required.' });
+
+  const actingUser = await getActingUser(req);
+  if (!actingUser) {
+    return res.status(401).json({ error: 'Not authenticated.' });
+  }
+
   try {
     const result = await pool.query(
       'UPDATE learning_sessions SET last_opened_at = NOW() WHERE id = $1 AND user_id = $2 RETURNING *',
-      [sid, uid]
+      [sid, actingUser.id]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Session not found.' });
     res.json(result.rows[0]);
@@ -327,15 +356,16 @@ router.patch('/:id/open', async (req, res) => {
 });
 
 // DELETE /api/sessions/:id
+// userId always comes from the authenticated session — never from the client.
 router.delete('/:id', async (req, res) => {
   const sid = parseInt(req.params.id, 10);
   if (!sid || isNaN(sid)) {
     return res.status(400).json({ error: 'Invalid session id.' });
   }
 
-  const uid = parseInt(req.body?.userId, 10);
-  if (!req.body?.userId || isNaN(uid)) {
-    return res.status(400).json({ error: 'userId is required.' });
+  const actingUser = await getActingUser(req);
+  if (!actingUser) {
+    return res.status(401).json({ error: 'Not authenticated.' });
   }
 
   const client = await pool.connect();
@@ -344,7 +374,7 @@ router.delete('/:id', async (req, res) => {
 
     const check = await client.query(
       'SELECT id FROM learning_sessions WHERE id = $1 AND user_id = $2',
-      [sid, uid]
+      [sid, actingUser.id]
     );
     if (check.rows.length === 0) {
       await client.query('ROLLBACK');

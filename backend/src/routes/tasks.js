@@ -2,8 +2,9 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db');
 const { tasks } = require('../data/taskRegistry');
-const { resolveUserId, resolveSessionId } = require('../utils/contextResolvers');
+const { resolveSessionId } = require('../utils/contextResolvers');
 const { saveCheckAttempt } = require('../utils/attemptRecorder');
+const { getActingUser } = require('../utils/authz');
 const {
   validateSqlStructure,
   solutionHasTopLevelOrderBy,
@@ -41,25 +42,38 @@ router.get('/:id', (req, res) => {
 });
 
 // GET /api/tasks/:id/solution
-router.get('/:id/solution', (req, res) => {
+// Requires login — any authenticated role (admin/mentor/student) may fetch a
+// solution; this only blocks anonymous/public access, no role restriction.
+router.get('/:id/solution', async (req, res) => {
+  const actingUser = await getActingUser(req);
+  if (!actingUser) {
+    return res.status(401).json({ error: 'Not authenticated.' });
+  }
+
   const task = tasks.find(t => t.id === parseInt(req.params.id));
   if (!task) return res.status(404).json({ error: 'Task not found' });
   res.json({ solution: task.solution.trim() });
 });
 
 // POST /api/tasks/:id/check
+// userId always comes from the authenticated session — never from the client.
 router.post('/:id/check', async (req, res) => {
   const task = tasks.find(t => t.id === parseInt(req.params.id));
   if (!task) return res.status(404).json({ error: 'Task not found' });
 
-  const { userSql, userId, sessionId } = req.body;
+  const { userSql, sessionId } = req.body;
 
   if (!userSql || typeof userSql !== 'string' || !userSql.trim()) {
     return res.status(400).json({ error: 'userSql is required.' });
   }
 
-  let resolvedUserId    = await resolveUserId(userId);
-  let resolvedSessionId = await resolveSessionId(resolvedUserId, sessionId);
+  const actingUser = await getActingUser(req);
+  if (!actingUser) {
+    return res.status(401).json({ error: 'Not authenticated.' });
+  }
+
+  const resolvedUserId    = actingUser.id;
+  const resolvedSessionId = await resolveSessionId(actingUser.id, sessionId);
 
   if (resolvedSessionId) {
     const sessionRow = await pool.query(
