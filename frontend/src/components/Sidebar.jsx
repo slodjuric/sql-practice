@@ -100,10 +100,8 @@ export default function Sidebar({
   onNavigate,
   selectedTable,
   onSelectTable,
-  users,
   activeUser,
-  onUserChange,
-  onCreateUser,
+  onLogout,
   onDeleteUser,
   sessions,
   activeSession,
@@ -120,11 +118,7 @@ export default function Sidebar({
   const [tablesLoading, setTablesLoading] = useState(false);
   const [tablesError, setTablesError] = useState(null);
 
-  // User form state
-  const [showAddUser, setShowAddUser] = useState(false);
-  const [newUsername, setNewUsername] = useState('');
-  const [userAddError, setUserAddError] = useState(null);
-  const [userSaving, setUserSaving] = useState(false);
+  // User state (self-delete only — no switcher, no create; see Step 6c)
   const [userDeleting, setUserDeleting] = useState(false);
   const [userDeleteError, setUserDeleteError] = useState(null);
 
@@ -178,31 +172,10 @@ export default function Sidebar({
   }
 
   // ── User handlers ───────────────────────────────────────────
-  function openAddUser() {
-    setNewUsername('');
-    setUserAddError(null);
-    setShowAddUser(true);
-  }
-
-  async function handleSaveUser() {
-    if (!newUsername.trim()) return;
-    setUserSaving(true);
-    setUserAddError(null);
-    try {
-      await onCreateUser(newUsername.trim());
-      setShowAddUser(false);
-      setNewUsername('');
-    } catch (err) {
-      setUserAddError(err.message);
-    } finally {
-      setUserSaving(false);
-    }
-  }
-
   async function handleDeleteUser() {
     if (!activeUser) return;
     const confirmed = window.confirm(
-      `Are you sure you want to delete user "${activeUser.username}"? This will delete all sessions, progress and activity for this user.`
+      `Are you sure you want to delete your account "${activeUser.username}"? This will delete all sessions, progress and activity for this account, and you will be logged out.`
     );
     if (!confirmed) return;
     setUserDeleting(true);
@@ -306,62 +279,32 @@ export default function Sidebar({
         <span>PostgreSQL Trainer</span>
       </div>
 
-      {/* ── User Switcher ──────────────────────────────────── */}
+      {/* ── Logged-in user (real identity via /api/auth/me — no switcher) ── */}
       <div className="sidebar-user">
         <div className="sidebar-user-row">
-          <span className="sidebar-user-label">User</span>
+          <div className="sidebar-user-identity">
+            <span className="sidebar-user-name">{activeUser?.username}</span>
+            <span className="sidebar-user-role">{activeUser?.role}</span>
+          </div>
           <div className="sidebar-user-controls">
-            <SidebarDropdown
-              options={users.map(u => ({ id: u.id, label: `${u.username} · ${u.role}` }))}
-              value={activeUser?.id ?? null}
-              onChange={id => { const u = users.find(u => u.id === id); if (u) onUserChange(u); }}
-              disabled={users.length === 0}
-              placeholder="No users"
-            />
-            <button
-              className="sidebar-add-user-btn"
-              onClick={openAddUser}
-              title="Add user"
-            >+</button>
             {activeUser?.role === 'admin' && (
               <button
                 className="sidebar-delete-user-btn"
                 onClick={handleDeleteUser}
-                title="Delete user"
-                disabled={!activeUser || userDeleting}
+                title="Delete my account"
+                disabled={userDeleting}
               >🗑</button>
             )}
+            <button
+              className="sidebar-logout-btn"
+              onClick={onLogout}
+              title="Log out"
+            >Log out</button>
           </div>
         </div>
 
         {userDeleteError && (
           <div className="sidebar-add-user-error">{userDeleteError}</div>
-        )}
-
-        {showAddUser && (
-          <div className="sidebar-add-user-form">
-            <input
-              className="sidebar-add-user-input"
-              value={newUsername}
-              onChange={e => setNewUsername(e.target.value)}
-              placeholder="Username..."
-              onKeyDown={e => {
-                if (e.key === 'Enter') handleSaveUser();
-                if (e.key === 'Escape') { setShowAddUser(false); setUserAddError(null); }
-              }}
-              autoFocus
-              disabled={userSaving}
-            />
-            <div className="sidebar-add-user-actions">
-              <button className="sidebar-add-user-save" onClick={handleSaveUser} disabled={userSaving || !newUsername.trim()}>
-                {userSaving ? '...' : 'Save'}
-              </button>
-              <button className="sidebar-add-user-cancel" onClick={() => { setShowAddUser(false); setUserAddError(null); }} disabled={userSaving}>
-                Cancel
-              </button>
-            </div>
-            {userAddError && <div className="sidebar-add-user-error">{userAddError}</div>}
-          </div>
         )}
       </div>
 

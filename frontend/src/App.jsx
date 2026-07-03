@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import Sidebar from './components/Sidebar';
+import LoginView from './components/LoginView';
 import PracticeView from './components/PracticeView';
 import DatabaseView from './components/DatabaseView';
 import QueryPlayground from './components/QueryPlayground';
@@ -15,9 +16,11 @@ export default function App() {
   const [practiceTarget,   setPracticeTarget]   = useState(null);
   const [practiceCategory, setPracticeCategory] = useState(null);
 
-  // ── User state ──────────────────────────────────────────────
-  const [users, setUsers] = useState([]);
+  // ── Auth state ──────────────────────────────────────────────
+  // activeUser is the real logged-in identity (GET /api/auth/me), not a
+  // switcher pick — the temporary switcher was removed in this step.
   const [activeUser, setActiveUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
 
   // ── Session state ───────────────────────────────────────────
   const [sessions,       setSessions]       = useState([]);
@@ -26,16 +29,13 @@ export default function App() {
   const [progressVersion, setProgressVersion] = useState(0);
   const [openPlanEditorOnProgress, setOpenPlanEditorOnProgress] = useState(false);
 
-  // Load users on mount
+  // Check for an existing session on mount — a 401 here just means
+  // "not logged in yet", not an application error, so it's handled silently.
   useEffect(() => {
-    api.users.list()
-      .then(userList => {
-        setUsers(userList);
-        const savedId = localStorage.getItem('activeUserId');
-        const saved   = savedId ? userList.find(u => u.id === parseInt(savedId, 10)) : null;
-        setActiveUser(saved || userList[0] || null);
-      })
-      .catch(() => {});
+    api.auth.me()
+      .then(setActiveUser)
+      .catch(() => setActiveUser(null))
+      .finally(() => setAuthLoading(false));
   }, []);
 
   // Load sessions whenever active user changes
@@ -46,7 +46,7 @@ export default function App() {
       return;
     }
 
-    api.sessions.list(activeUser.id)
+    api.sessions.list()
       .then(list => {
         setSessions(list);
 
@@ -65,7 +65,7 @@ export default function App() {
         }
 
         setActiveSession(picked);
-        if (picked) api.sessions.open(picked.id, activeUser?.id).catch(() => {});
+        if (picked) api.sessions.open(picked.id).catch(() => {});
       })
       .catch(() => {});
   }, [activeUser]);
@@ -84,32 +84,37 @@ export default function App() {
       .catch(() => setSessionFilters({ topics: [], difficulties: [], projects: [] }));
   }, [activeSession?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── User management ─────────────────────────────────────────
-  function handleUserChange(user) {
+  // ── Auth management ──────────────────────────────────────────
+  function handleLoginSuccess(user) {
     setActiveUser(user);
-    if (user) localStorage.setItem('activeUserId', String(user.id));
   }
 
-  async function handleCreateUser(username) {
-    const newUser = await api.users.create(username);
-    setUsers(prev => [...prev, newUser]);
-    handleUserChange(newUser);
-    return newUser;
+  async function handleLogout() {
+    try {
+      await api.auth.logout();
+    } catch {
+      // logging out client-side regardless of whether the server call succeeded
+    }
+    setActiveUser(null);
+    setSessions([]);
+    setActiveSession(null);
+    setCurrentView('progress');
   }
 
+  // Admin-only, self-delete only (see Sidebar) — deletes the logged-in account.
   async function handleDeleteUser() {
     if (!activeUser) return;
     const deletedId = activeUser.id;
-    await api.users.delete(deletedId, activeUser.id);
-    localStorage.removeItem('activeUserId');
+    await api.users.delete(deletedId);
+    try {
+      await api.auth.logout();
+    } catch {
+      // account is already gone server-side; logging out regardless
+    }
     localStorage.removeItem(`activeSessionId:user:${deletedId}`);
-    const remaining = users.filter(u => u.id !== deletedId);
-    setUsers(remaining);
+    setActiveUser(null);
     setSessions([]);
     setActiveSession(null);
-    const nextUser = remaining[0] || null;
-    setActiveUser(nextUser);
-    if (nextUser) localStorage.setItem('activeUserId', String(nextUser.id));
     setCurrentView('progress');
   }
 
@@ -118,12 +123,12 @@ export default function App() {
     setActiveSession(session);
     if (session && activeUser) {
       localStorage.setItem(`activeSessionId:user:${activeUser.id}`, String(session.id));
-      api.sessions.open(session.id, activeUser?.id).catch(() => {});
+      api.sessions.open(session.id).catch(() => {});
     }
   }
 
   async function handleCreateSession(name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [], datasetId = null) {
-    const { session, filters } = await api.sessions.create(activeUser.id, name, description, planType, topics, difficulties, projects, categories, datasetId);
+    const { session, filters } = await api.sessions.create(name, description, planType, topics, difficulties, projects, categories, datasetId);
     setSessions(prev => [...prev, session]);
     handleSessionChange(session);
     setSessionFilters(filters);
@@ -133,7 +138,7 @@ export default function App() {
   }
 
   async function handleUpdateSession(sessionId, updates) {
-    const { session, filters } = await api.sessions.update(sessionId, { userId: activeUser.id, ...updates });
+    const { session, filters } = await api.sessions.update(sessionId, updates);
     setSessions(prev => prev.map(s => s.id === session.id ? session : s));
     setActiveSession(session);
     setSessionFilters(filters);
@@ -143,7 +148,7 @@ export default function App() {
   async function handleDeleteSession() {
     if (!activeSession || !activeUser) return;
     const deletedId = activeSession.id;
-    await api.sessions.delete(deletedId, activeUser.id);
+    await api.sessions.delete(deletedId);
     localStorage.removeItem(`activeSessionId:user:${activeUser.id}`);
     const remaining = sessions.filter(s => s.id !== deletedId);
     setSessions(remaining);
@@ -151,7 +156,7 @@ export default function App() {
     setActiveSession(nextSession);
     if (nextSession) {
       localStorage.setItem(`activeSessionId:user:${activeUser.id}`, String(nextSession.id));
-      api.sessions.open(nextSession.id, activeUser.id).catch(() => {});
+      api.sessions.open(nextSession.id).catch(() => {});
     }
     setCurrentView('progress');
   }
@@ -166,7 +171,7 @@ export default function App() {
   async function handleCompleteSession() {
     if (!activeSession || !activeUser) return;
     try {
-      const updated = await api.sessions.complete(activeSession.id, activeUser.id);
+      const updated = await api.sessions.complete(activeSession.id);
       setSessions(prev => prev.map(s => s.id === updated.id ? updated : s));
       setActiveSession(updated);
     } catch (err) {
@@ -178,7 +183,7 @@ export default function App() {
   async function handleReopenSession() {
     if (!activeSession || !activeUser) return;
     try {
-      const updated = await api.sessions.reopen(activeSession.id, activeUser.id);
+      const updated = await api.sessions.reopen(activeSession.id);
       setSessions(prev => prev.map(s => s.id === updated.id ? updated : s));
       setActiveSession(updated);
     } catch (err) {
@@ -277,6 +282,14 @@ export default function App() {
     }
   }
 
+  if (authLoading) {
+    return <div className="app-loading">Loading…</div>;
+  }
+
+  if (!activeUser) {
+    return <LoginView onLogin={handleLoginSuccess} />;
+  }
+
   return (
     <div className="app">
       <Sidebar
@@ -284,10 +297,8 @@ export default function App() {
         onNavigate={handleNavigate}
         selectedTable={selectedTable}
         onSelectTable={handleSelectTable}
-        users={users}
         activeUser={activeUser}
-        onUserChange={handleUserChange}
-        onCreateUser={handleCreateUser}
+        onLogout={handleLogout}
         onDeleteUser={handleDeleteUser}
         sessions={sessions}
         activeSession={activeSession}

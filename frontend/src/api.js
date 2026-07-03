@@ -1,15 +1,11 @@
 const BASE = '/api';
 
-// TEMPORARY until real login exists: identifies the acting user to the
-// backend's authz layer (see backend/src/utils/authz.js). Mirrors whatever
-// getActingUser() expects there — currently the x-acting-user-id header.
-function actingUserHeaders(actingUserId) {
-  return actingUserId ? { 'x-acting-user-id': String(actingUserId) } : {};
-}
-
 async function request(path, options = {}) {
   const { headers, ...rest } = options;
   const res = await fetch(`${BASE}${path}`, {
+    // Vite's dev proxy makes /api same-origin, so the session cookie is
+    // already sent by default — explicit here so it doesn't depend on that.
+    credentials: 'same-origin',
     ...rest,
     headers: { 'Content-Type': 'application/json', ...headers },
   });
@@ -32,29 +28,33 @@ async function request(path, options = {}) {
 export const api = {
   health: () => request('/health'),
 
+  auth: {
+    login: (username, password) =>
+      request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
+    logout: () => request('/auth/logout', { method: 'POST' }),
+    me: () => request('/auth/me'),
+  },
+
   users: {
     list: () => request('/users'),
     create: (username) => request('/users', { method: 'POST', body: JSON.stringify({ username }) }),
-    // actingUserId: the user performing the delete — must be an admin (enforced backend-side).
-    delete: (userId, actingUserId) =>
-      request(`/users/${userId}`, { method: 'DELETE', headers: actingUserHeaders(actingUserId) }),
+    // Acting user is resolved from the session cookie — must be an admin (enforced backend-side).
+    delete: (userId) => request(`/users/${userId}`, { method: 'DELETE' }),
   },
 
+  // userId is never sent — the backend resolves it from the session cookie
+  // and only ever acts on the caller's own sessions.
   sessions: {
-    list: (userId) => request(`/sessions?userId=${userId}`),
-    create: (userId, name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [], datasetId = null) =>
-      request('/sessions', { method: 'POST', body: JSON.stringify({ userId, name, description, planType, topics, difficulties, projects, categories, ...(datasetId ? { datasetId } : {}) }) }),
+    list: () => request('/sessions'),
+    create: (name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [], datasetId = null) =>
+      request('/sessions', { method: 'POST', body: JSON.stringify({ name, description, planType, topics, difficulties, projects, categories, ...(datasetId ? { datasetId } : {}) }) }),
     filters: (sessionId) => request(`/sessions/${sessionId}/filters`),
     update: (sessionId, updates) =>
       request(`/sessions/${sessionId}`, { method: 'PATCH', body: JSON.stringify(updates) }),
-    complete: (sessionId, userId) =>
-      request(`/sessions/${sessionId}/complete`, { method: 'PATCH', body: JSON.stringify({ userId }) }),
-    // actingUserId: the user requesting the reopen — must be admin/mentor (enforced backend-side).
-    reopen: (sessionId, actingUserId) =>
-      request(`/sessions/${sessionId}/reopen`, { method: 'PATCH', headers: actingUserHeaders(actingUserId) }),
-    open: (sessionId, userId) =>
-      request(`/sessions/${sessionId}/open`, { method: 'PATCH', body: JSON.stringify({ userId }) }),
-    delete: (sessionId, userId) => request(`/sessions/${sessionId}`, { method: 'DELETE', body: JSON.stringify({ userId }) }),
+    complete: (sessionId) => request(`/sessions/${sessionId}/complete`, { method: 'PATCH' }),
+    reopen: (sessionId) => request(`/sessions/${sessionId}/reopen`, { method: 'PATCH' }),
+    open: (sessionId) => request(`/sessions/${sessionId}/open`, { method: 'PATCH' }),
+    delete: (sessionId) => request(`/sessions/${sessionId}`, { method: 'DELETE' }),
   },
 
   datasets: {
@@ -76,31 +76,26 @@ export const api = {
     },
   },
 
-  query: (sql, taskId, userId, sessionId) =>
+  // userId is never sent — the backend resolves it from the session cookie.
+  query: (sql, taskId, sessionId) =>
     request('/query', {
       method: 'POST',
       body: JSON.stringify({
         sql,
         ...(taskId    ? { taskId }    : {}),
-        ...(userId    ? { userId }    : {}),
         ...(sessionId ? { sessionId } : {}),
       }),
     }),
 
+  // userId is never sent — the backend resolves it from the session cookie.
   progress: {
-    summary: (userId, sessionId) => {
-      const p = new URLSearchParams();
-      if (userId)    p.set('userId',    userId);
-      if (sessionId) p.set('sessionId', sessionId);
-      const q = p.toString();
-      return request(`/progress/summary${q ? `?${q}` : ''}`);
+    summary: (sessionId) => {
+      const q = sessionId ? `?sessionId=${sessionId}` : '';
+      return request(`/progress/summary${q}`);
     },
-    taskStatuses: (userId, sessionId) => {
-      const p = new URLSearchParams();
-      if (userId)    p.set('userId',    userId);
-      if (sessionId) p.set('sessionId', sessionId);
-      const q = p.toString();
-      return request(`/progress/tasks-status${q ? `?${q}` : ''}`);
+    taskStatuses: (sessionId) => {
+      const q = sessionId ? `?sessionId=${sessionId}` : '';
+      return request(`/progress/tasks-status${q}`);
     },
   },
 
@@ -114,12 +109,12 @@ export const api = {
     },
     get: (id) => request(`/tasks/${id}`),
     solution: (id) => request(`/tasks/${id}/solution`),
-    check: (id, userSql, userId, sessionId) =>
+    // userId is never sent — the backend resolves it from the session cookie.
+    check: (id, userSql, sessionId) =>
       request(`/tasks/${id}/check`, {
         method: 'POST',
         body: JSON.stringify({
           userSql,
-          ...(userId    ? { userId }    : {}),
           ...(sessionId ? { sessionId } : {}),
         }),
       }),
