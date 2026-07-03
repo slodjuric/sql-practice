@@ -1,11 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db');
-const tasks = require('../data/tasks.json');
+const { tasks, taskMap } = require('../data/taskRegistry');
 const { resolveUserId, resolveSessionId } = require('../utils/contextResolvers');
 const { matchesSessionFilters, getSessionFilters } = require('../utils/taskFilters');
-
-const taskMap = Object.fromEntries(tasks.map(t => [t.id, t]));
+const { getDatasetBySessionId } = require('../utils/datasetResolver');
 
 const PROJECT_LABELS = {
   'student-performance': 'Student Performance Analysis',
@@ -67,18 +66,19 @@ router.get('/summary', async (req, res) => {
     const sessionId = await resolveSessionId(userId, req.query.sessionId);
 
     if (!userId || !sessionId) {
+      const academicTasks = tasks.filter(t => !t.datasetKey || t.datasetKey === 'academic');
       return res.json({
-        totalTasks: tasks.length,
+        totalTasks: academicTasks.length,
         solved: 0,
         inProgress: 0,
         planType: 'topic',
-        byGroup: buildGroupStats(tasks, {}, 'topic'),
+        byGroup: buildGroupStats(academicTasks, {}, 'topic'),
         recentAttempts: [],
         inProgressTasks: [],
       });
     }
 
-    const [statusRows, recentRows, filters] = await Promise.all([
+    const [statusRows, recentRows, filters, dataset] = await Promise.all([
       // user_task_progress = current task status source of truth
       pool.query(`
         SELECT task_id, status, attempts_count
@@ -94,10 +94,13 @@ router.get('/summary', async (req, res) => {
         ORDER BY created_at DESC
       `, [userId, sessionId]),
       getSessionFilters(sessionId),
+      getDatasetBySessionId(sessionId),
     ]);
 
-    // Tasks in scope for this plan
-    const planTasks   = applyPlanFilter(tasks, filters);
+    // Scope task list to the session's dataset before applying plan filters.
+    const datasetKey    = dataset?.key || 'academic';
+    const datasetTasks  = tasks.filter(t => !t.datasetKey || t.datasetKey === datasetKey);
+    const planTasks     = applyPlanFilter(datasetTasks, filters);
     const planTaskIds = new Set(planTasks.map(t => t.id));
 
     // Progress map — only count attempts for tasks in the plan

@@ -287,6 +287,12 @@ function SessionSummaryCard({ activeUser, activeSession, summary, sessionFilters
                   <span className="session-summary-label">User</span>
                   <span className="session-summary-value">{activeUser.username}</span>
                 </div>
+                {activeSession.dataset_name && (
+                  <div className="session-summary-item">
+                    <span className="session-summary-label">Dataset</span>
+                    <span className="session-summary-value">{activeSession.dataset_name}</span>
+                  </div>
+                )}
                 {activeSession.description && (
                   <div className="session-summary-item">
                     <span className="session-summary-label">Description</span>

@@ -55,4 +55,35 @@ function validateSqlSafety(sql) {
   return { safe: true };
 }
 
-module.exports = { validateSqlSafety };
+// Rejects SQL that contains schema-qualified references to datasets OTHER than
+// the session's allowed schema.  Uses a known-schema list so that legitimate
+// table.column references (e.g. students.first_name) are never flagged —
+// only identifiers that match a real dataset schema name are inspected.
+//
+// knownDatasetSchemas: all schema_name values from the datasets table.
+// When only one dataset exists, otherSchemas is empty and the check is a no-op.
+function validateSchemaScope(sql, allowedSchema, knownDatasetSchemas = []) {
+  const normalizedAllowed = allowedSchema.toLowerCase();
+  const otherSchemas = new Set(
+    knownDatasetSchemas.map(s => s.toLowerCase()).filter(s => s !== normalizedAllowed)
+  );
+
+  if (otherSchemas.size === 0) return { safe: true };
+
+  const normalized = sql.toLowerCase();
+  // Match word.word patterns; the left side is a candidate schema reference.
+  const pattern = /\b([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\b/g;
+  let match;
+  while ((match = pattern.exec(normalized)) !== null) {
+    if (otherSchemas.has(match[1])) {
+      return {
+        safe:   false,
+        reason: `Cross-dataset query not allowed. Your session only has access to the "${allowedSchema}" dataset.`,
+      };
+    }
+  }
+
+  return { safe: true };
+}
+
+module.exports = { validateSqlSafety, validateSchemaScope };

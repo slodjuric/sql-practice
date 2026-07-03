@@ -1,0 +1,196 @@
+{
+  "key": "cinema",
+  "name": "Cinema",
+  "schemaName": "cinema",
+  "description": "Cinema dataset with films, people, reviews, roles and descriptions",
+  "type": "official",
+  "sampleOptions": {
+    "mode": "preserve"
+  },
+  "loadOrder": [
+    "description",
+    "films",
+    "people",
+    "reviews",
+    "roles"
+  ],
+  "tables": {
+    "description": {
+      "csvFile": "description.csv",
+      "columns": [
+        {
+          "name": "index",
+          "type": "INTEGER",
+          "primaryKey": true
+        },
+        {
+          "name": "description",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "length",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "rating",
+          "type": "TEXT",
+          "nullable": false
+        }
+      ]
+    },
+    "films": {
+      "csvFile": "films.csv",
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "primaryKey": true
+        },
+        {
+          "name": "title",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "release_year",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "country",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "duration",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "language",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "certification",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "gross",
+          "type": "BIGINT",
+          "nullable": true
+        },
+        {
+          "name": "budget",
+          "type": "BIGINT",
+          "nullable": true
+        }
+      ]
+    },
+    "people": {
+      "csvFile": "people.csv",
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "primaryKey": true
+        },
+        {
+          "name": "name",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "birthdate",
+          "type": "TIMESTAMP",
+          "nullable": true
+        },
+        {
+          "name": "deathdate",
+          "type": "TIMESTAMP",
+          "nullable": true
+        }
+      ]
+    },
+    "reviews": {
+      "csvFile": "reviews.csv",
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "primaryKey": true
+        },
+        {
+          "name": "film_id",
+          "type": "INTEGER",
+          "nullable": false,
+          "references": {
+            "table": "films",
+            "column": "id"
+          }
+        },
+        {
+          "name": "num_user",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "num_critic",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "imdb_score",
+          "type": "NUMERIC",
+          "nullable": false
+        },
+        {
+          "name": "num_votes",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "facebook_likes",
+          "type": "INTEGER",
+          "nullable": false
+        }
+      ]
+    },
+    "roles": {
+      "csvFile": "roles.csv",
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "primaryKey": true
+        },
+        {
+          "name": "film_id",
+          "type": "INTEGER",
+          "nullable": false,
+          "references": {
+            "table": "films",
+            "column": "id"
+          }
+        },
+        {
+          "name": "person_id",
+          "type": "INTEGER",
+          "nullable": false,
+          "references": {
+            "table": "people",
+            "column": "id"
+          }
+        },
+        {
+          "name": "role",
+          "type": "TEXT",
+          "nullable": false
+        }
+      ]
+    }
+  }
+}

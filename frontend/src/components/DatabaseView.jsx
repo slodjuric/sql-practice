@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 
-export default function DatabaseView({ selectedTable }) {
+export default function DatabaseView({ selectedTable, activeSession }) {
   const [columns, setColumns] = useState([]);
   const [preview, setPreview] = useState(null);
   const [activeTab, setActiveTab] = useState('data');
@@ -15,9 +15,10 @@ export default function DatabaseView({ selectedTable }) {
     setColumns([]);
     setPreview(null);
     setActiveTab('data');
+    const sessionId = activeSession?.id ?? null;
     Promise.all([
-      api.tables.columns(selectedTable),
-      api.tables.preview(selectedTable),
+      api.tables.columns(selectedTable, sessionId),
+      api.tables.preview(selectedTable, sessionId),
     ])
       .then(([cols, prev]) => {
         setColumns(cols);
@@ -25,7 +26,7 @@ export default function DatabaseView({ selectedTable }) {
       })
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
-  }, [selectedTable]);
+  }, [selectedTable, activeSession?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!selectedTable) {
     return (
@@ -42,7 +43,7 @@ export default function DatabaseView({ selectedTable }) {
         <h2>{selectedTable}</h2>
         <p>
           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-            sql_practice › public › {selectedTable}
+            sql_practice › {activeSession?.schema_name || 'academic'} › {selectedTable}
           </span>
         </p>
       </div>

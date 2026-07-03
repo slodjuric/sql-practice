@@ -32,8 +32,8 @@ export const api = {
 
   sessions: {
     list: (userId) => request(`/sessions?userId=${userId}`),
-    create: (userId, name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = []) =>
-      request('/sessions', { method: 'POST', body: JSON.stringify({ userId, name, description, planType, topics, difficulties, projects, categories }) }),
+    create: (userId, name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [], datasetId = null) =>
+      request('/sessions', { method: 'POST', body: JSON.stringify({ userId, name, description, planType, topics, difficulties, projects, categories, ...(datasetId ? { datasetId } : {}) }) }),
     filters: (sessionId) => request(`/sessions/${sessionId}/filters`),
     update: (sessionId, updates) =>
       request(`/sessions/${sessionId}`, { method: 'PATCH', body: JSON.stringify(updates) }),
@@ -46,10 +46,23 @@ export const api = {
     delete: (sessionId, userId) => request(`/sessions/${sessionId}`, { method: 'DELETE', body: JSON.stringify({ userId }) }),
   },
 
+  datasets: {
+    list: () => request('/datasets'),
+  },
+
   tables: {
-    list: () => request('/tables'),
-    columns: (name) => request(`/tables/${name}/columns`),
-    preview: (name) => request(`/tables/${name}/preview`),
+    list: (sessionId) => {
+      const q = sessionId ? `?sessionId=${sessionId}` : '';
+      return request(`/tables${q}`);
+    },
+    columns: (name, sessionId) => {
+      const q = sessionId ? `?sessionId=${sessionId}` : '';
+      return request(`/tables/${name}/columns${q}`);
+    },
+    preview: (name, sessionId) => {
+      const q = sessionId ? `?sessionId=${sessionId}` : '';
+      return request(`/tables/${name}/preview${q}`);
+    },
   },
 
   query: (sql, taskId, userId, sessionId) =>

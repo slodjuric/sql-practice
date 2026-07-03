@@ -70,8 +70,11 @@ export default function App() {
       .catch(() => {});
   }, [activeUser]);
 
-  // Load filters whenever the active session changes
+  // Load filters whenever the active session changes.
+  // Also clear the selected table so DatabaseView never loads a stale table
+  // into a dataset that may not contain it (e.g. after switching from academic to football).
   useEffect(() => {
+    setSelectedTable(null);
     if (!activeSession?.id) {
       setSessionFilters({ topics: [], difficulties: [] });
       return;
@@ -119,8 +122,8 @@ export default function App() {
     }
   }
 
-  async function handleCreateSession(name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = []) {
-    const { session, filters } = await api.sessions.create(activeUser.id, name, description, planType, topics, difficulties, projects, categories);
+  async function handleCreateSession(name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [], datasetId = null) {
+    const { session, filters } = await api.sessions.create(activeUser.id, name, description, planType, topics, difficulties, projects, categories, datasetId);
     setSessions(prev => [...prev, session]);
     handleSessionChange(session);
     setSessionFilters(filters);
@@ -246,7 +249,7 @@ export default function App() {
           />
         );
       case 'database':
-        return <DatabaseView selectedTable={selectedTable} />;
+        return <DatabaseView selectedTable={selectedTable} activeSession={activeSession} />;
       case 'playground':
         return (
           <QueryPlayground
