@@ -312,7 +312,7 @@ export default function Sidebar({
           <span className="sidebar-user-label">User</span>
           <div className="sidebar-user-controls">
             <SidebarDropdown
-              options={users.map(u => ({ id: u.id, label: u.username }))}
+              options={users.map(u => ({ id: u.id, label: `${u.username} · ${u.role}` }))}
               value={activeUser?.id ?? null}
               onChange={id => { const u = users.find(u => u.id === id); if (u) onUserChange(u); }}
               disabled={users.length === 0}
@@ -323,12 +323,14 @@ export default function Sidebar({
               onClick={openAddUser}
               title="Add user"
             >+</button>
-            <button
-              className="sidebar-delete-user-btn"
-              onClick={handleDeleteUser}
-              title="Delete user"
-              disabled={!activeUser || userDeleting}
-            >🗑</button>
+            {activeUser?.role === 'admin' && (
+              <button
+                className="sidebar-delete-user-btn"
+                onClick={handleDeleteUser}
+                title="Delete user"
+                disabled={!activeUser || userDeleting}
+              >🗑</button>
+            )}
           </div>
         </div>
 
@@ -403,17 +405,15 @@ export default function Sidebar({
 
         {activeSession && (
           activeSession.status === 'completed' ? (
-            canReopenSession ? (
+            // Students should not see the Reopen action at all — backend
+            // enforces this independently (canReopenSession is UX only).
+            canReopenSession && (
               <button
                 className="sidebar-session-action sidebar-session-reopen"
                 onClick={handleReopenClick}
                 disabled={sessionActioning}
               >
                 {sessionActioning ? 'Reopening…' : 'Reopen session'}
-              </button>
-            ) : (
-              <button className="sidebar-session-action sidebar-session-reopen" disabled title="Only mentor/admin can reopen a completed session.">
-                Reopen session
               </button>
             )
           ) : (

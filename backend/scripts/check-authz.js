@@ -49,6 +49,11 @@ async function userExists(id) {
   return r.rows.length > 0;
 }
 
+async function adminCount() {
+  const r = await pool.query("SELECT COUNT(*)::int AS n FROM users WHERE role = 'admin'");
+  return r.rows[0].n;
+}
+
 async function run() {
   await cleanup();
 
@@ -60,6 +65,11 @@ async function run() {
     server = app.listen(0);
     await new Promise(resolve => server.once('listening', resolve));
     const base = `http://localhost:${server.address().port}/api/users`;
+
+    // Baseline admin count in this environment, measured before we create any
+    // temp admins of our own — lets the last-admin-guard cases below adapt
+    // instead of assuming a fresh DB with zero pre-existing admins.
+    const baselineAdmins = await adminCount();
 
     // ── Setup: one acting user per role, plus one victim per case ────────────
     const adminId   = await createUser(`${PREFIX}admin`,   'admin');
@@ -136,6 +146,46 @@ async function run() {
         pass('e', 'Nonexistent acting user id returns 401 (row untouched)');
       } else {
         fail('e', 'Nonexistent acting user must return 401', `status=${res.status}, stillExists=${stillExists}`);
+      }
+    }
+
+    // ── Case f: deleting an admin is allowed while another admin still exists ──
+    // At this point adminId is the only admin we've created; add a second so
+    // the global count is baselineAdmins + 2 before this delete.
+    const admin2Id = await createUser(`${PREFIX}admin2`, 'admin');
+    {
+      const res = await fetch(`${base}/${admin2Id}`, {
+        method: 'DELETE',
+        headers: { 'x-acting-user-id': String(adminId) },
+      });
+      const stillExists = await userExists(admin2Id);
+      if (res.status === 200 && !stillExists) {
+        pass('f', 'Admin can delete another admin while more than one admin exists (200, row removed)');
+      } else {
+        fail('f', 'Deleting an admin must succeed when another admin remains', `status=${res.status}, stillExists=${stillExists}`);
+      }
+    }
+
+    // ── Case g: deleting the last remaining admin is blocked ──────────────────
+    // Only runs the hard assertion when this environment has no pre-existing
+    // admins of its own — otherwise adminId deleting itself would legitimately
+    // succeed (real admins would still remain) and the guard wouldn't fire.
+    {
+      const countBeforeSelfDelete = await adminCount();
+      const res = await fetch(`${base}/${adminId}`, {
+        method: 'DELETE',
+        headers: { 'x-acting-user-id': String(adminId) },
+      });
+      const stillExists = await userExists(adminId);
+
+      if (baselineAdmins === 0) {
+        if (res.status === 400 && stillExists) {
+          pass('g', `Deleting the last remaining admin is blocked (400, row untouched, count was ${countBeforeSelfDelete})`);
+        } else {
+          fail('g', 'Deleting the last remaining admin must be blocked', `status=${res.status}, stillExists=${stillExists}, adminCountBefore=${countBeforeSelfDelete}`);
+        }
+      } else {
+        console.log(`[g] SKIP — ${baselineAdmins} pre-existing admin(s) in this environment; cannot deterministically test the last-admin block without touching real users`);
       }
     }
 

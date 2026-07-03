@@ -59,10 +59,21 @@ router.delete('/:id', requireRole('admin'), async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    const check = await client.query('SELECT id FROM users WHERE id = $1', [userId]);
+    const check = await client.query('SELECT id, role FROM users WHERE id = $1', [userId]);
     if (check.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'User not found.' });
+    }
+
+    // Guard: never delete the last remaining admin — this is the only account
+    // able to perform admin-only actions (including this delete), so losing
+    // it would lock the platform out of admin capability entirely.
+    if (check.rows[0].role === 'admin') {
+      const adminCount = await client.query("SELECT COUNT(*)::int AS n FROM users WHERE role = 'admin'");
+      if (adminCount.rows[0].n <= 1) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Cannot delete the last remaining admin.' });
+      }
     }
 
     await client.query('DELETE FROM task_attempts WHERE user_id = $1', [userId]);
