@@ -100,7 +100,7 @@ export default function App() {
   async function handleDeleteUser() {
     if (!activeUser) return;
     const deletedId = activeUser.id;
-    await api.users.delete(deletedId);
+    await api.users.delete(deletedId, activeUser.id);
     localStorage.removeItem('activeUserId');
     localStorage.removeItem(`activeSessionId:user:${deletedId}`);
     const remaining = users.filter(u => u.id !== deletedId);
@@ -156,13 +156,11 @@ export default function App() {
     setCurrentView('progress');
   }
 
-  // TODO: Restrict reopen by role once `role` is added to the users table.
-  // Future policy: only mentors/admins can reopen a completed session; students cannot.
-  // For now the users table has no role column, so all users can reopen their own sessions.
-  // When roles exist: check `user.role === 'mentor' || user.role === 'admin'` here,
-  // and enforce the same guard in PATCH /api/sessions/:id/reopen on the backend.
+  // Mirrors backend canReopenSession() (backend/src/utils/authz.js) for UX
+  // visibility only — the backend is the source of truth and enforces this
+  // independently on PATCH /api/sessions/:id/reopen.
   function canReopenSession(user) {
-    return true;
+    return user?.role === 'admin' || user?.role === 'mentor';
   }
 
   async function handleCompleteSession() {

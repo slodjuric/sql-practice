@@ -46,6 +46,30 @@ async function initDb() {
     )
   `);
 
+  // Migration: add role to users — existing rows default to 'student'.
+  await pool.query(`
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'student'
+  `);
+  await pool.query(`
+    UPDATE users SET role = 'student' WHERE role IS NULL
+  `);
+
+  // Migration: enforce allowed role values
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'users_role_valid'
+          AND conrelid = 'users'::regclass
+      ) THEN
+        ALTER TABLE users
+          ADD CONSTRAINT users_role_valid CHECK (role IN ('admin', 'mentor', 'student'));
+      END IF;
+    END $$;
+  `);
+
   await pool.query(`
     INSERT INTO users (username) VALUES ('default')
     ON CONFLICT (username) DO NOTHING

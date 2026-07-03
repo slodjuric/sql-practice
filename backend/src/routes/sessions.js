@@ -4,6 +4,7 @@ const pool = require('../db');
 const { tasks } = require('../data/taskRegistry');
 const { matchesSessionFilters, getSessionFilters } = require('../utils/taskFilters');
 const { getDatasetByKey, getDatasetBySessionId } = require('../utils/datasetResolver');
+const { getActingUser, canReopenSession } = require('../utils/authz');
 
 async function insertSessionFilters(client, sessionId, { topics = [], difficulties = [], projects = [], categories = [] } = {}) {
   const rows = [
@@ -261,19 +262,47 @@ router.patch('/:id/complete', async (req, res) => {
 });
 
 // PATCH /api/sessions/:id/reopen  — reopens a completed session back to active
+// Acting user is resolved via the temporary x-acting-user-id header (see
+// utils/authz.js) until real login/auth exists. Permission is enforced by
+// canReopenSession — students can never reopen, even their own session;
+// backend is the source of truth here, not the frontend button state.
 router.patch('/:id/reopen', async (req, res) => {
   const sid = parseInt(req.params.id, 10);
-  const uid = parseInt(req.body.userId, 10);
-  if (!req.body.userId || isNaN(uid)) return res.status(400).json({ error: 'userId is required.' });
+
+  const actingUser = await getActingUser(req);
+  if (!actingUser) {
+    return res.status(401).json({ error: 'Acting user is required.' });
+  }
+
   try {
+    const sessionRow = await pool.query(
+      'SELECT id, user_id FROM learning_sessions WHERE id = $1',
+      [sid]
+    );
+    if (sessionRow.rows.length === 0) {
+      return res.status(404).json({ error: 'Session not found.' });
+    }
+    const session = sessionRow.rows[0];
+
+    // A student targeting someone else's session gets 404, not 403 — this
+    // avoids letting a student distinguish "doesn't exist" from "exists but
+    // isn't mine" by probing session ids. Only their own session (where the
+    // real rule — students can never reopen — kicks in) surfaces as 403.
+    if (actingUser.role === 'student' && session.user_id !== actingUser.id) {
+      return res.status(404).json({ error: 'Session not found.' });
+    }
+
+    if (!canReopenSession(actingUser, session)) {
+      return res.status(403).json({ error: 'You do not have permission to reopen this session.' });
+    }
+
     const result = await pool.query(
       `UPDATE learning_sessions
        SET status = 'active', completed_at = NULL
-       WHERE id = $1 AND user_id = $2
+       WHERE id = $1
        RETURNING *`,
-      [sid, uid]
+      [sid]
     );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Session not found.' });
     res.json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });

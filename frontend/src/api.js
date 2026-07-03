@@ -1,9 +1,17 @@
 const BASE = '/api';
 
+// TEMPORARY until real login exists: identifies the acting user to the
+// backend's authz layer (see backend/src/utils/authz.js). Mirrors whatever
+// getActingUser() expects there — currently the x-acting-user-id header.
+function actingUserHeaders(actingUserId) {
+  return actingUserId ? { 'x-acting-user-id': String(actingUserId) } : {};
+}
+
 async function request(path, options = {}) {
+  const { headers, ...rest } = options;
   const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
+    ...rest,
+    headers: { 'Content-Type': 'application/json', ...headers },
   });
 
   const text = await res.text();
@@ -27,7 +35,9 @@ export const api = {
   users: {
     list: () => request('/users'),
     create: (username) => request('/users', { method: 'POST', body: JSON.stringify({ username }) }),
-    delete: (userId) => request(`/users/${userId}`, { method: 'DELETE' }),
+    // actingUserId: the user performing the delete — must be an admin (enforced backend-side).
+    delete: (userId, actingUserId) =>
+      request(`/users/${userId}`, { method: 'DELETE', headers: actingUserHeaders(actingUserId) }),
   },
 
   sessions: {
@@ -39,8 +49,9 @@ export const api = {
       request(`/sessions/${sessionId}`, { method: 'PATCH', body: JSON.stringify(updates) }),
     complete: (sessionId, userId) =>
       request(`/sessions/${sessionId}/complete`, { method: 'PATCH', body: JSON.stringify({ userId }) }),
-    reopen: (sessionId, userId) =>
-      request(`/sessions/${sessionId}/reopen`, { method: 'PATCH', body: JSON.stringify({ userId }) }),
+    // actingUserId: the user requesting the reopen — must be admin/mentor (enforced backend-side).
+    reopen: (sessionId, actingUserId) =>
+      request(`/sessions/${sessionId}/reopen`, { method: 'PATCH', headers: actingUserHeaders(actingUserId) }),
     open: (sessionId, userId) =>
       request(`/sessions/${sessionId}/open`, { method: 'PATCH', body: JSON.stringify({ userId }) }),
     delete: (sessionId, userId) => request(`/sessions/${sessionId}`, { method: 'DELETE', body: JSON.stringify({ userId }) }),

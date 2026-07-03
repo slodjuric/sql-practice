@@ -1,12 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db');
+const { VALID_ROLES, isValidRole } = require('../utils/roleValidator');
+const { requireRole } = require('../utils/authz');
 
 // GET /api/users
 router.get('/', async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT id, username, created_at FROM users ORDER BY created_at ASC'
+      'SELECT id, username, role, created_at FROM users ORDER BY created_at ASC'
     );
     res.json(result.rows);
   } catch (err) {
@@ -16,15 +18,24 @@ router.get('/', async (req, res) => {
 
 // POST /api/users
 router.post('/', async (req, res) => {
-  const { username } = req.body;
+  const { username, role } = req.body;
   if (!username || typeof username !== 'string' || !username.trim()) {
     return res.status(400).json({ error: 'Username is required.' });
   }
   const trimmed = username.trim();
+
+  let resolvedRole = 'student';
+  if (role !== undefined && role !== null && role !== '') {
+    if (!isValidRole(role)) {
+      return res.status(400).json({ error: `Invalid role. Must be one of: ${VALID_ROLES.join(', ')}.` });
+    }
+    resolvedRole = role;
+  }
+
   try {
     const result = await pool.query(
-      'INSERT INTO users (username) VALUES ($1) RETURNING id, username, created_at',
-      [trimmed]
+      'INSERT INTO users (username, role) VALUES ($1, $2) RETURNING id, username, role, created_at',
+      [trimmed, resolvedRole]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -36,7 +47,9 @@ router.post('/', async (req, res) => {
 });
 
 // DELETE /api/users/:id
-router.delete('/:id', async (req, res) => {
+// Admin-only. Acting user is resolved via the temporary x-acting-user-id
+// header (see utils/authz.js) until real login/auth exists.
+router.delete('/:id', requireRole('admin'), async (req, res) => {
   const userId = parseInt(req.params.id, 10);
   if (!userId || isNaN(userId)) {
     return res.status(400).json({ error: 'Invalid user id.' });
