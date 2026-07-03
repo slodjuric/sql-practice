@@ -3,10 +3,12 @@
 /**
  * Authorization layer verification for PATCH /api/sessions/:id/reopen.
  *
- * Spins up a minimal in-process Express app (just the sessions router,
- * mounted the same way as in src/index.js) on an ephemeral port, and issues
- * real HTTP requests against it so getActingUser()/canReopenSession() and
- * the route handler are exercised exactly as in production.
+ * Spins up a minimal in-process Express app (session middleware + the auth
+ * router + the sessions router, mounted the same way as in src/index.js) on
+ * an ephemeral port. Authenticates via real POST /api/auth/login and carries
+ * the resulting cookie on subsequent requests — no x-acting-user-id header,
+ * matching how getActingUser()/canReopenSession() resolve identity in
+ * production.
  *
  * Requires a live DB connection (reads DB config from backend/.env).
  *
@@ -14,10 +16,16 @@
  */
 
 const express = require('express');
+const session = require('express-session');
+const pgSession = require('connect-pg-simple')(session);
+const bcrypt = require('bcryptjs');
 const pool = require('../src/db');
+const authRouter = require('../src/routes/auth');
 const sessionsRouter = require('../src/routes/sessions');
 
 const PREFIX = '_reopen_test_';
+const TEST_SESSION_SECRET = 'test-secret-for-check-reopen-authz-script-only';
+const TEST_PASSWORD = 'test-password-123456';
 
 let passed = 0;
 let failed = 0;
@@ -43,9 +51,10 @@ async function cleanup() {
 }
 
 async function createUser(username, role) {
+  const hash = await bcrypt.hash(TEST_PASSWORD, 10);
   const r = await pool.query(
-    'INSERT INTO users (username, role) VALUES ($1, $2) RETURNING id',
-    [username, role]
+    'INSERT INTO users (username, role, password_hash) VALUES ($1, $2, $3) RETURNING id',
+    [username, role, hash]
   );
   return r.rows[0].id;
 }
@@ -65,6 +74,22 @@ async function sessionStatus(id) {
   return r.rows[0]?.status;
 }
 
+function extractCookie(res) {
+  const raw = res.headers.get('set-cookie');
+  if (!raw) return null;
+  return raw.split(';')[0];
+}
+
+async function login(base, username, password) {
+  const res = await fetch(`${base}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const body = await res.json();
+  return { res, body, cookie: extractCookie(res) };
+}
+
 async function run() {
   await cleanup();
 
@@ -72,117 +97,119 @@ async function run() {
   try {
     const app = express();
     app.use(express.json());
+    app.use(session({
+      store: new pgSession({ pool, createTableIfMissing: true }),
+      secret: TEST_SESSION_SECRET,
+      resave: false,
+      saveUninitialized: false,
+      rolling: true,
+      cookie: { httpOnly: true, sameSite: 'lax', secure: false, maxAge: 14 * 24 * 60 * 60 * 1000 },
+    }));
+    app.use('/api/auth', authRouter);
     app.use('/api/sessions', sessionsRouter);
     server = app.listen(0);
     await new Promise(resolve => server.once('listening', resolve));
-    const base = `http://localhost:${server.address().port}/api/sessions`;
+    const base = `http://localhost:${server.address().port}`;
+    const sessionsBase = `${base}/api/sessions`;
 
-    // ── Setup: one acting user per role, two distinct session owners ─────────
-    const adminId    = await createUser(`${PREFIX}admin`,    'admin');
-    const mentorId   = await createUser(`${PREFIX}mentor`,   'mentor');
-    const studentAId = await createUser(`${PREFIX}studentA`, 'student');
+    // ── Setup: one logged-in-capable acting user per role, two session owners ─
+    const adminUsername    = `${PREFIX}admin`;
+    const mentorUsername   = `${PREFIX}mentor`;
+    const studentAUsername = `${PREFIX}studentA`;
+    const adminId    = await createUser(adminUsername,    'admin');
+    const mentorId   = await createUser(mentorUsername,   'mentor');
+    const studentAId = await createUser(studentAUsername, 'student');
     const studentBId = await createUser(`${PREFIX}studentB`, 'student');
 
     const sessionOwnA1 = await createCompletedSession(studentAId, `${PREFIX}session_a1`);
-    const sessionOwnA2 = await createCompletedSession(studentAId, `${PREFIX}session_a2`);
     const sessionOwnB1 = await createCompletedSession(studentBId, `${PREFIX}session_b1`);
     const sessionOwnB2 = await createCompletedSession(studentBId, `${PREFIX}session_b2`);
     const sessionOwnB3 = await createCompletedSession(studentBId, `${PREFIX}session_b3`);
     const sessionOwnB4 = await createCompletedSession(studentBId, `${PREFIX}session_b4`);
 
-    // ── Case a: student cannot reopen own completed session ──────────────────
+    // ── Case a: logged-in student cannot reopen own completed session ────────
     {
-      const res = await fetch(`${base}/${sessionOwnA1}/reopen`, {
-        method: 'PATCH',
-        headers: { 'x-acting-user-id': String(studentAId) },
-      });
+      const { cookie } = await login(base, studentAUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/${sessionOwnA1}/reopen`, { method: 'PATCH', headers: { Cookie: cookie } });
       const status = await sessionStatus(sessionOwnA1);
       if (res.status === 403 && status === 'completed') {
-        pass('a', "Student cannot reopen own completed session (403, status unchanged)");
+        pass('a', 'Logged-in student cannot reopen own completed session (403, status unchanged)');
       } else {
         fail('a', 'Student must not be able to reopen own completed session', `httpStatus=${res.status}, dbStatus=${status}`);
       }
     }
 
-    // ── Case b: student cannot reopen another user's completed session ───────
+    // ── Case b: logged-in student targeting someone else's session gets 404 ──
     // Must be 404, not 403 — a student must not be able to distinguish a
     // nonexistent session id from one that exists but belongs to someone else.
     {
-      const res = await fetch(`${base}/${sessionOwnB1}/reopen`, {
-        method: 'PATCH',
-        headers: { 'x-acting-user-id': String(studentAId) },
-      });
+      const { cookie } = await login(base, studentAUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/${sessionOwnB1}/reopen`, { method: 'PATCH', headers: { Cookie: cookie } });
       const status = await sessionStatus(sessionOwnB1);
       if (res.status === 404 && status === 'completed') {
-        pass('b', "Student cannot reopen another user's completed session (404, status unchanged)");
+        pass('b', "Logged-in student targeting another user's completed session gets 404 (status unchanged)");
       } else {
         fail('b', "Student must get 404 (not 403) for another user's session", `httpStatus=${res.status}, dbStatus=${status}`);
       }
     }
 
-    // ── Case c: admin can reopen a completed session ─────────────────────────
+    // ── Case c: logged-in admin can reopen a completed session ───────────────
     {
-      const res = await fetch(`${base}/${sessionOwnB2}/reopen`, {
-        method: 'PATCH',
-        headers: { 'x-acting-user-id': String(adminId) },
-      });
+      const { cookie } = await login(base, adminUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/${sessionOwnB2}/reopen`, { method: 'PATCH', headers: { Cookie: cookie } });
       const status = await sessionStatus(sessionOwnB2);
       if (res.status === 200 && status === 'active') {
-        pass('c', 'Admin can reopen a completed session (200, status=active)');
+        pass('c', 'Logged-in admin can reopen a completed session (200, status=active)');
       } else {
         fail('c', 'Admin must be able to reopen a completed session', `httpStatus=${res.status}, dbStatus=${status}`);
       }
     }
 
-    // ── Case d: mentor can reopen a completed session (temporary, broad) ─────
+    // ── Case d: logged-in mentor can reopen a completed session (temporary) ──
     {
-      const res = await fetch(`${base}/${sessionOwnB3}/reopen`, {
-        method: 'PATCH',
-        headers: { 'x-acting-user-id': String(mentorId) },
-      });
+      const { cookie } = await login(base, mentorUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/${sessionOwnB3}/reopen`, { method: 'PATCH', headers: { Cookie: cookie } });
       const status = await sessionStatus(sessionOwnB3);
       if (res.status === 200 && status === 'active') {
-        pass('d', 'Mentor can reopen a completed session (200, status=active)');
+        pass('d', 'Logged-in mentor can reopen a completed session (200, status=active, temporary rule)');
       } else {
         fail('d', 'Mentor must be able to reopen a completed session (temporary rule)', `httpStatus=${res.status}, dbStatus=${status}`);
       }
     }
 
-    // ── Case e: missing acting user returns 401 ───────────────────────────────
+    // ── Case e: no login at all returns 401 ────────────────────────────────────
     {
-      const res = await fetch(`${base}/${sessionOwnB4}/reopen`, { method: 'PATCH' });
+      const res = await fetch(`${sessionsBase}/${sessionOwnB4}/reopen`, { method: 'PATCH' });
       const status = await sessionStatus(sessionOwnB4);
       if (res.status === 401 && status === 'completed') {
-        pass('e', 'Missing acting user header returns 401 (status unchanged)');
+        pass('e', 'No login at all returns 401 (status unchanged)');
       } else {
-        fail('e', 'Missing acting user must return 401', `httpStatus=${res.status}, dbStatus=${status}`);
+        fail('e', 'No login must return 401', `httpStatus=${res.status}, dbStatus=${status}`);
       }
     }
 
-    // ── Case f: invalid/nonexistent acting user returns 401 ───────────────────
+    // ── Case f: nonexistent session id returns 404 ─────────────────────────────
     {
-      const res = await fetch(`${base}/${sessionOwnA2}/reopen`, {
-        method: 'PATCH',
-        headers: { 'x-acting-user-id': '999999999' },
-      });
-      const status = await sessionStatus(sessionOwnA2);
-      if (res.status === 401 && status === 'completed') {
-        pass('f', 'Nonexistent acting user id returns 401 (status unchanged)');
-      } else {
-        fail('f', 'Nonexistent acting user must return 401', `httpStatus=${res.status}, dbStatus=${status}`);
-      }
-    }
-
-    // ── Case g: nonexistent session id returns 404 ────────────────────────────
-    {
-      const res = await fetch(`${base}/999999999/reopen`, {
-        method: 'PATCH',
-        headers: { 'x-acting-user-id': String(adminId) },
-      });
+      const { cookie } = await login(base, adminUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/999999999/reopen`, { method: 'PATCH', headers: { Cookie: cookie } });
       if (res.status === 404) {
-        pass('g', 'Nonexistent session id returns 404');
+        pass('f', 'Nonexistent session id returns 404');
       } else {
-        fail('g', 'Nonexistent session id must return 404', `httpStatus=${res.status}`);
+        fail('f', 'Nonexistent session id must return 404', `httpStatus=${res.status}`);
+      }
+    }
+
+    // ── Case g (bonus): a garbage/tampered cookie is treated as no session ───
+    {
+      const res = await fetch(`${sessionsBase}/${sessionOwnB4}/reopen`, {
+        method: 'PATCH',
+        headers: { Cookie: 'connect.sid=s%3Agarbage-not-a-real-session.invalidsignature' },
+      });
+      const status = await sessionStatus(sessionOwnB4);
+      if (res.status === 401 && status === 'completed') {
+        pass('g', 'A garbage/tampered session cookie is treated as unauthenticated (401, status unchanged)');
+      } else {
+        fail('g', 'A garbage cookie must return 401', `httpStatus=${res.status}, dbStatus=${status}`);
       }
     }
 

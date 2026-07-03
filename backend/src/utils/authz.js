@@ -3,25 +3,20 @@
 const pool = require('../db');
 
 /**
- * TEMPORARY acting-user resolution — until real login/auth exists.
+ * Resolves the acting user from the authenticated session (real login —
+ * see routes/auth.js). Previously read a temporary x-acting-user-id header;
+ * that mechanism has been fully removed, no fallback.
  *
- * The acting user id is read from the `x-acting-user-id` request header.
- * This stands in for what will eventually be the authenticated
- * session/JWT user. Once real login lands, only this function's internals
- * change (read from req.session / req.user instead of a header) — its
- * signature and return shape stay the same, so callers do not need to change.
- *
- * Returns { id, username, role } on success, or null if the header is
- * missing, not a valid integer, or does not match an existing user.
+ * Returns { id, username, role } on success, or null if there is no
+ * session, no session.userId, or it doesn't match an existing user.
  */
 async function getActingUser(req) {
-  const raw = req.headers['x-acting-user-id'];
-  const id = parseInt(raw, 10);
-  if (!raw || isNaN(id)) return null;
+  const userId = req.session?.userId;
+  if (!userId) return null;
 
   const result = await pool.query(
     'SELECT id, username, role FROM users WHERE id = $1',
-    [id]
+    [userId]
   );
   return result.rows[0] || null;
 }
