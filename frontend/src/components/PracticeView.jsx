@@ -116,10 +116,10 @@ export default function PracticeView({
   const [initialAttemptSql,  setInitialAttemptSql]  = useState(null);
   const [taskOrigin,         setTaskOrigin]         = useState(null);
 
-  // Load all tasks once so group views can compute which cards have plan tasks.
+  // Load all tasks for the active session's dataset so group views can compute which cards have plan tasks.
   useEffect(() => {
-    api.tasks.list().then(setAllTasks).catch(() => {});
-  }, []);
+    api.tasks.list({ datasetKey: activeSession?.dataset_key }).then(setAllTasks).catch(() => {});
+  }, [activeSession?.dataset_key]);
 
   // ── Status loading ─────────────────────────────────────────
   const loadStatuses = useCallback(async () => {
@@ -145,12 +145,12 @@ export default function PracticeView({
     }
     let cancelled = false;
     setTasksLoading(true);
-    api.tasks.list({ [selectedGroup.filterKey]: selectedItem.id })
+    api.tasks.list({ [selectedGroup.filterKey]: selectedItem.id, datasetKey: activeSession?.dataset_key })
       .then(data  => { if (!cancelled) setTasks(data.map((t, idx) => ({ ...t, _originalIdx: idx }))); })
       .catch(()   => { if (!cancelled) setTasks([]); })
       .finally(() => { if (!cancelled) setTasksLoading(false); });
     return () => { cancelled = true; };
-  }, [selectedItem]); // intentionally reads selectedGroup from closure — they always update together
+  }, [selectedItem, activeSession?.dataset_key]); // intentionally reads selectedGroup from closure — they always update together
 
   // ── Navigate to a task from the Progress dashboard ─────────
   useEffect(() => {
