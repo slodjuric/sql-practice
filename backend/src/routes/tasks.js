@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db');
-const tasks = require('../data/tasks.json');
+const { tasks } = require('../data/taskRegistry');
 const { resolveUserId, resolveSessionId } = require('../utils/contextResolvers');
 const { saveCheckAttempt } = require('../utils/attemptRecorder');
 const {

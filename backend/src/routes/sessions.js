@@ -1,9 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db');
-const tasks = require('../data/tasks.json');
+const { tasks } = require('../data/taskRegistry');
 const { matchesSessionFilters, getSessionFilters } = require('../utils/taskFilters');
-const { getDatasetByKey } = require('../utils/datasetResolver');
+const { getDatasetByKey, getDatasetBySessionId } = require('../utils/datasetResolver');
 
 async function insertSessionFilters(client, sessionId, { topics = [], difficulties = [], projects = [], categories = [] } = {}) {
   const rows = [
@@ -227,14 +227,17 @@ router.patch('/:id/complete', async (req, res) => {
     if (sessionCheck.rows.length === 0) return res.status(404).json({ error: 'Session not found.' });
 
     // Verify every in-scope task has been run at least once
-    const [filters, progressResult] = await Promise.all([
+    const [filters, progressResult, dataset] = await Promise.all([
       getSessionFilters(sid),
       pool.query(
         'SELECT task_id, status FROM user_task_progress WHERE user_id = $1 AND session_id = $2',
         [uid, sid]
       ),
+      getDatasetBySessionId(sid),
     ]);
-    const planTasks   = tasks.filter(t => matchesSessionFilters(t, filters));
+    const datasetKey  = dataset?.key || 'academic';
+    const datasetTasks = tasks.filter(t => !t.datasetKey || t.datasetKey === datasetKey);
+    const planTasks   = datasetTasks.filter(t => matchesSessionFilters(t, filters));
     const progressMap = Object.fromEntries(progressResult.rows.map(r => [r.task_id, r.status]));
     const hasNotStarted = planTasks.some(t => (progressMap[t.id] || 'not_started') === 'not_started');
     if (hasNotStarted) {

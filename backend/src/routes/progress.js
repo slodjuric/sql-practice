@@ -1,12 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db');
-const tasks = require('../data/tasks.json');
+const { tasks, taskMap } = require('../data/taskRegistry');
 const { resolveUserId, resolveSessionId } = require('../utils/contextResolvers');
 const { matchesSessionFilters, getSessionFilters } = require('../utils/taskFilters');
 const { getDatasetBySessionId } = require('../utils/datasetResolver');
-
-const taskMap = Object.fromEntries(tasks.map(t => [t.id, t]));
 
 const PROJECT_LABELS = {
   'student-performance': 'Student Performance Analysis',
