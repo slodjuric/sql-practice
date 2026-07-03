@@ -86,14 +86,16 @@ function convertValue(raw, colDef) {
 
 // ── DDL builder ───────────────────────────────────────────────────────────────
 
-function buildCreateTable(schemaName, tableName, columns) {
+function buildCreateTable(schemaName, tableName, columns, { makeFKsNullable = false } = {}) {
   const parts = columns.map(col => {
     let def = `  "${col.name}" ${col.type}`;
     if (col.primaryKey) {
       def += ' PRIMARY KEY';
     } else {
-      if (col.unique)          def += ' UNIQUE';
-      if (col.nullable === false) def += ' NOT NULL';
+      if (col.unique) def += ' UNIQUE';
+      // makeFKsNullable: FK columns are created without NOT NULL so missing references can be stored as NULL.
+      const override = makeFKsNullable && !!col.references;
+      if (col.nullable === false && !override) def += ' NOT NULL';
     }
     if (col.references) {
       def += ` REFERENCES "${schemaName}"."${col.references.table}"("${col.references.column}")`;
@@ -153,9 +155,25 @@ async function main() {
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
   const { key, name, schemaName, description, type, loadOrder, tables } = config;
 
+  const importOptions   = config.importOptions || {};
+  const missingRefs     = importOptions.missingReferences     || 'skip';
+  const makeFKsNullable = importOptions.makeForeignKeysNullable === true;
+
+  if (missingRefs !== 'skip' && missingRefs !== 'nullify') {
+    console.error(`Unknown importOptions.missingReferences: "${missingRefs}". Use "skip" or "nullify".`);
+    process.exit(1);
+  }
+
   console.log(`\nImporting dataset: ${name} (${key})`);
   console.log(`Schema: ${schemaName}`);
-  console.log(`Tables: ${loadOrder.join(' → ')}\n`);
+  console.log(`Tables: ${loadOrder.join(' → ')}`);
+  if (missingRefs !== 'skip' || makeFKsNullable) {
+    const opts = [];
+    if (missingRefs !== 'skip')  opts.push(`missingReferences: ${missingRefs}`);
+    if (makeFKsNullable)         opts.push('makeForeignKeysNullable: true');
+    console.log(`Options: ${opts.join(', ')}`);
+  }
+  console.log();
 
   const pool = new Pool({
     host:     process.env.DB_HOST     || 'localhost',
@@ -183,10 +201,19 @@ async function main() {
 
     // 3. Create tables in load order
     console.log(`[3] Creating tables`);
+    const madeNullable = {}; // tableName → [colName] for report
     for (const tableName of loadOrder) {
-      const ddl = buildCreateTable(schemaName, tableName, tables[tableName].columns);
+      const overridden = makeFKsNullable
+        ? tables[tableName].columns
+            .filter(col => !col.primaryKey && col.references && col.nullable === false)
+            .map(col => col.name)
+        : [];
+      if (overridden.length > 0) madeNullable[tableName] = overridden;
+
+      const ddl = buildCreateTable(schemaName, tableName, tables[tableName].columns, { makeFKsNullable });
       await client.query(ddl);
-      console.log(`    Created ${schemaName}.${tableName}`);
+      const note = overridden.length > 0 ? ` (nullable override: ${overridden.join(', ')})` : '';
+      console.log(`    Created ${schemaName}.${tableName}${note}`);
     }
 
     // 4. Upsert datasets registry row
@@ -205,6 +232,26 @@ async function main() {
 
     // 5. Import CSV files
     console.log(`[5] Importing CSV data`);
+
+    // Pre-scan all FK references so we know which table.column pairs to collect
+    // as we import each table (used for cross-row FK validation in child tables).
+    const fkTargets = {}; // tableName → Set<colName>
+    for (const tDef of Object.values(tables)) {
+      for (const col of tDef.columns) {
+        if (col.references) {
+          const { table: refTable, column: refCol } = col.references;
+          if (!fkTargets[refTable]) fkTargets[refTable] = new Set();
+          fkTargets[refTable].add(refCol);
+        }
+      }
+    }
+
+    // collectedValues[tableName][colName] = Set<string> of imported values
+    const collectedValues = {};
+
+    // importStats[tableName] = { inserted, skipped, nulled, missingFKExamples[] }
+    const importStats = {};
+
     for (const tableName of loadOrder) {
       const tableDef = tables[tableName];
       const csvPath  = path.join(datasetDir, 'csv', tableDef.csvFile);
@@ -216,8 +263,17 @@ async function main() {
       const records = csvToObjects(fs.readFileSync(csvPath, 'utf8'));
       console.log(`  ${tableName}: ${records.length} records from ${tableDef.csvFile}`);
 
-      const rows = records.map((record, rowIdx) =>
-        tableDef.columns.map(col => {
+      // When makeFKsNullable, treat FK columns as nullable for convertValue so empty CSV values
+      // become null instead of throwing — the DB column is also created nullable.
+      const effectiveCols = tableDef.columns.map(col =>
+        (makeFKsNullable && col.references && !col.primaryKey && col.nullable === false)
+          ? { ...col, nullable: true }
+          : col
+      );
+
+      // Parse all rows
+      const allRows = records.map((record, rowIdx) =>
+        effectiveCols.map(col => {
           const csvKey = col.sourceName || col.name;
           const raw    = record[csvKey];
           try {
@@ -228,7 +284,76 @@ async function main() {
         })
       );
 
-      await batchInsert(client, schemaName, tableName, tableDef.columns, rows);
+      // Collect referenced-column values for this table so child tables can validate FK refs
+      if (fkTargets[tableName]) {
+        collectedValues[tableName] = {};
+        for (const colName of fkTargets[tableName]) {
+          const colIdx = tableDef.columns.findIndex(c => c.name === colName);
+          if (colIdx !== -1) {
+            collectedValues[tableName][colName] = new Set(
+              allRows
+                .map(r => (r[colIdx] !== null && r[colIdx] !== undefined ? String(r[colIdx]) : null))
+                .filter(v => v !== null)
+            );
+          }
+        }
+      }
+
+      // Identify FK columns in this table and their valid-value sets
+      const fkChecks = tableDef.columns
+        .map((col, idx) => col.references
+          ? { idx, col, validSet: collectedValues[col.references.table]?.[col.references.column] }
+          : null)
+        .filter(Boolean);
+
+      // Filter / transform rows for FK validity
+      let inserted = 0, skipped = 0, nulled = 0;
+      const missingFKExamples = [];
+      const filteredRows = [];
+
+      for (const row of allRows) {
+        const rowCopy  = [...row];
+        let   skipRow  = false;
+        let   rowNulled = 0;
+        const rowExamples = [];
+
+        for (const { idx, col, validSet } of fkChecks) {
+          const fkVal = rowCopy[idx];
+          if (fkVal === null || fkVal === undefined) continue;
+
+          if (!validSet || !validSet.has(String(fkVal))) {
+            rowExamples.push(`${col.name}=${fkVal}`);
+            // Can nullify when: not a PK, AND (column is already nullable OR mode is 'nullify')
+            const canNullify = !col.primaryKey && (col.nullable || missingRefs === 'nullify');
+            if (canNullify) {
+              rowCopy[idx] = null;
+              rowNulled++;
+            } else {
+              // Skip: FK column is PRIMARY KEY (cannot be null), or column is NOT NULL and mode is 'skip'
+              skipRow = true;
+            }
+          }
+        }
+
+        if (skipRow) {
+          skipped++;
+          for (const ex of rowExamples) {
+            if (missingFKExamples.length < 10) missingFKExamples.push(ex);
+          }
+        } else {
+          nulled += rowNulled;
+          filteredRows.push(rowCopy);
+          inserted++;
+          if (rowNulled > 0) {
+            for (const ex of rowExamples) {
+              if (missingFKExamples.length < 10) missingFKExamples.push(ex);
+            }
+          }
+        }
+      }
+
+      await batchInsert(client, schemaName, tableName, tableDef.columns, filteredRows);
+      importStats[tableName] = { inserted, skipped, nulled, missingFKExamples };
     }
 
     await client.query('COMMIT');
@@ -239,6 +364,30 @@ async function main() {
     for (const tableName of loadOrder) {
       const r = await pool.query(`SELECT COUNT(*) AS n FROM "${schemaName}"."${tableName}"`);
       console.log(`  ${schemaName}.${tableName}: ${r.rows[0].n}`);
+    }
+
+    // 7. Import report
+    if (Object.keys(madeNullable).length > 0) {
+      console.log('\nNullable overrides (makeForeignKeysNullable):');
+      for (const [t, cols] of Object.entries(madeNullable)) {
+        console.log(`  ${t}: ${cols.join(', ')}`);
+      }
+    }
+
+    const hasIssues = Object.values(importStats).some(s => s.skipped > 0 || s.nulled > 0);
+    if (hasIssues) {
+      console.log('\nFK filter report:');
+      for (const tableName of loadOrder) {
+        const s = importStats[tableName];
+        if (!s) continue;
+        const parts = [`inserted: ${s.inserted}`];
+        if (s.skipped > 0) parts.push(`skipped: ${s.skipped}`);
+        if (s.nulled  > 0) parts.push(`FK set to NULL: ${s.nulled}`);
+        console.log(`  ${tableName.padEnd(16)}: ${parts.join(', ')}`);
+        if (s.missingFKExamples.length > 0) {
+          console.log(`    Missing FK examples: ${s.missingFKExamples.join(', ')}`);
+        }
+      }
     }
 
   } catch (err) {

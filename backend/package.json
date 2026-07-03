@@ -15,7 +15,10 @@
     "test:query-limits": "node scripts/check-query-limits.js",
     "db:init": "node scripts/run-sql-file.js",
     "test:setup-flow": "node scripts/check-setup-flow.js",
-    "dataset:import": "node scripts/import-dataset.js"
+    "dataset:import": "node scripts/import-dataset.js",
+    "dataset:build-sample": "node scripts/build-dataset-sample.js",
+    "dataset:generate-config": "node scripts/generate-dataset-config.js",
+    "dataset:reset": "node scripts/reset-dataset.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

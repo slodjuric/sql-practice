@@ -180,6 +180,22 @@ Rotira sve lozinke koje su bile u tom fajlu.
 
 ---
 
+## Adding new datasets
+
+See [docs/adding-new-dataset.md](docs/adding-new-dataset.md) for the full guide.
+
+Quick summary: put source CSV files in `backend/src/data/datasets/<key>/raw/`, then run three commands from inside `backend/`:
+
+```bash
+npm run dataset:generate-config -- <datasetKey>
+npm run dataset:build-sample -- <datasetKey>
+npm run dataset:import -- <datasetKey>
+```
+
+The `csv/` folder is generated automatically — you do not create it manually. To undo and start over for one dataset: `npm run dataset:reset -- <datasetKey>`.
+
+---
+
 ## Napomene za developere
 
 - `.env` fajl se ne commituje — za konfiguraciju koristi `.env.example` kao predložak

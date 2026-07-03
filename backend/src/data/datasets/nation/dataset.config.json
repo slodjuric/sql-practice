@@ -1,0 +1,228 @@
+{
+  "key": "nation",
+  "name": "Nation",
+  "schemaName": "nation",
+  "description": "Nation dataset",
+  "type": "official",
+  "sampleOptions": {
+    "mode": "consistent",
+    "rootTable": "countries",
+    "limit": 100
+  },
+  "loadOrder": [
+    "continents",
+    "regions",
+    "countries",
+    "languages",
+    "country_language",
+    "country_stats",
+    "region_areas"
+  ],
+  "tables": {
+    "continents": {
+      "csvFile": "continents.csv",
+      "columns": [
+        {
+          "name": "index",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "continent_id",
+          "type": "INTEGER",
+          "primaryKey": true
+        },
+        {
+          "name": "name",
+          "type": "TEXT",
+          "nullable": false
+        }
+      ]
+    },
+    "countries": {
+      "csvFile": "countries.csv",
+      "columns": [
+        {
+          "name": "index",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "country_id",
+          "type": "INTEGER",
+          "primaryKey": true
+        },
+        {
+          "name": "name",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "area",
+          "type": "NUMERIC",
+          "nullable": false
+        },
+        {
+          "name": "national_day",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "country_code2",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "country_code3",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "region_id",
+          "type": "INTEGER",
+          "nullable": false,
+          "references": {
+            "table": "regions",
+            "column": "region_id"
+          }
+        }
+      ]
+    },
+    "country_language": {
+      "csvFile": "country_language.csv",
+      "columns": [
+        {
+          "name": "index",
+          "type": "INTEGER",
+          "primaryKey": true
+        },
+        {
+          "name": "country_id",
+          "type": "INTEGER",
+          "nullable": false,
+          "references": {
+            "table": "countries",
+            "column": "country_id"
+          }
+        },
+        {
+          "name": "language_id",
+          "type": "INTEGER",
+          "nullable": false,
+          "references": {
+            "table": "languages",
+            "column": "language_id"
+          }
+        },
+        {
+          "name": "official",
+          "type": "INTEGER",
+          "nullable": false
+        }
+      ]
+    },
+    "country_stats": {
+      "csvFile": "country_stats.csv",
+      "columns": [
+        {
+          "name": "index",
+          "type": "INTEGER",
+          "primaryKey": true
+        },
+        {
+          "name": "country_id",
+          "type": "INTEGER",
+          "nullable": false,
+          "references": {
+            "table": "countries",
+            "column": "country_id"
+          }
+        },
+        {
+          "name": "year",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "population",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "gdp",
+          "type": "BIGINT",
+          "nullable": false
+        }
+      ]
+    },
+    "languages": {
+      "csvFile": "languages.csv",
+      "columns": [
+        {
+          "name": "index",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "language_id",
+          "type": "INTEGER",
+          "primaryKey": true
+        },
+        {
+          "name": "language",
+          "type": "TEXT",
+          "nullable": false
+        }
+      ]
+    },
+    "region_areas": {
+      "csvFile": "region_areas.csv",
+      "columns": [
+        {
+          "name": "index",
+          "type": "INTEGER",
+          "primaryKey": true
+        },
+        {
+          "name": "region_name",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "region_area",
+          "type": "NUMERIC",
+          "nullable": false
+        }
+      ]
+    },
+    "regions": {
+      "csvFile": "regions.csv",
+      "columns": [
+        {
+          "name": "index",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "region_id",
+          "type": "INTEGER",
+          "primaryKey": true
+        },
+        {
+          "name": "name",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "continent_id",
+          "type": "INTEGER",
+          "nullable": false,
+          "references": {
+            "table": "continents",
+            "column": "continent_id"
+          }
+        }
+      ]
+    }
+  }
+}
