@@ -1,8 +1,12 @@
 const express = require('express');
 const router = express.Router();
+const bcrypt = require('bcryptjs');
 const pool = require('../db');
 const { VALID_ROLES, isValidRole } = require('../utils/roleValidator');
 const { requireRole } = require('../utils/authz');
+
+const MIN_PASSWORD_LENGTH = 8;
+const BCRYPT_COST = 10;
 
 // GET /api/users
 // Admin-only. Acting user is resolved from the authenticated session
@@ -20,8 +24,10 @@ router.get('/', requireRole('admin'), async (req, res) => {
 
 // POST /api/users
 // Admin-only — account creation is an admin action, not public registration.
+// Creates a login-ready user: a password is required and hashed here so the
+// account can log in immediately, without a separate set-user-password.js step.
 router.post('/', requireRole('admin'), async (req, res) => {
-  const { username, role } = req.body;
+  const { username, role, password } = req.body;
   if (!username || typeof username !== 'string' || !username.trim()) {
     return res.status(400).json({ error: 'Username is required.' });
   }
@@ -35,10 +41,18 @@ router.post('/', requireRole('admin'), async (req, res) => {
     resolvedRole = role;
   }
 
+  if (!password || typeof password !== 'string') {
+    return res.status(400).json({ error: 'Password is required.' });
+  }
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    return res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters.` });
+  }
+
   try {
+    const hash = await bcrypt.hash(password, BCRYPT_COST);
     const result = await pool.query(
-      'INSERT INTO users (username, role) VALUES ($1, $2) RETURNING id, username, role, created_at',
-      [trimmed, resolvedRole]
+      'INSERT INTO users (username, role, password_hash) VALUES ($1, $2, $3) RETURNING id, username, role, created_at',
+      [trimmed, resolvedRole, hash]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {

@@ -362,6 +362,47 @@ async function initDb() {
     ON learning_sessions(user_id, name)
   `);
 
+  // Migration: add created_by_user_id to learning_sessions — distinguishes
+  // the session owner (user_id, whose progress/attempts it tracks) from who
+  // actually created it (a mentor/admin creating a session on a student's
+  // behalf, or the student themselves).
+  await pool.query(`
+    ALTER TABLE learning_sessions
+    ADD COLUMN IF NOT EXISTS created_by_user_id INTEGER REFERENCES users(id)
+  `);
+
+  // Backfill: existing sessions were all self-created, so owner == creator.
+  await pool.query(`
+    UPDATE learning_sessions
+    SET created_by_user_id = user_id
+    WHERE created_by_user_id IS NULL
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_learning_sessions_created_by
+    ON learning_sessions(created_by_user_id)
+  `);
+
+  // ── Mentor assignments ───────────────────────────────────────────────────
+  // Links a mentor (displayed as "Professor" in the UI — the role value
+  // itself stays "mentor") to the students they can view/manage. Purely
+  // additive infrastructure for the professor/student workflow; no route
+  // reads or writes this table yet.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS mentor_assignments (
+      id         SERIAL PRIMARY KEY,
+      mentor_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (mentor_id, student_id)
+    )
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_mentor_assignments_student
+    ON mentor_assignments(student_id)
+  `);
+
   console.log('Progress tables ready');
 }
 

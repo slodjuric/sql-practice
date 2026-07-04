@@ -4,7 +4,7 @@ const pool = require('../db');
 const { tasks } = require('../data/taskRegistry');
 const { matchesSessionFilters, getSessionFilters } = require('../utils/taskFilters');
 const { getDatasetByKey, getDatasetBySessionId } = require('../utils/datasetResolver');
-const { getActingUser, canReopenSession } = require('../utils/authz');
+const { getActingUser, canReopenSession, canCreateSessionForUser, canAccessStudent } = require('../utils/authz');
 
 async function insertSessionFilters(client, sessionId, { topics = [], difficulties = [], projects = [], categories = [] } = {}) {
   const rows = [
@@ -38,12 +38,33 @@ async function resolveDatasetId(providedDatasetId) {
 }
 
 // GET /api/sessions
-// userId always comes from the authenticated session — never from the client.
+// By default, returns the authenticated user's own sessions — unchanged
+// from before. Optionally accepts ?targetUserId=<id> so an admin/mentor can
+// read another authorized user's sessions (e.g. a mentor viewing an
+// assigned student's sessions). Authorization is always re-checked
+// server-side via canAccessStudent, never trusted from the query string.
 router.get('/', async (req, res) => {
   const actingUser = await getActingUser(req);
   if (!actingUser) {
     return res.status(401).json({ error: 'Not authenticated.' });
   }
+
+  let ownerId = actingUser.id;
+  const { targetUserId } = req.query;
+  if (targetUserId !== undefined && targetUserId !== null && targetUserId !== '') {
+    const parsedTargetId = parseInt(targetUserId, 10);
+    if (isNaN(parsedTargetId)) {
+      return res.status(400).json({ error: 'Invalid targetUserId.' });
+    }
+
+    const allowed = await canAccessStudent(actingUser, parsedTargetId);
+    if (!allowed) {
+      return res.status(403).json({ error: 'You do not have permission to view this user\'s sessions.' });
+    }
+
+    ownerId = parsedTargetId;
+  }
+
   try {
     const result = await pool.query(
       `SELECT ls.*,
@@ -55,7 +76,7 @@ router.get('/', async (req, res) => {
        LEFT JOIN datasets d ON d.id = ls.dataset_id
        WHERE ls.user_id = $1
        ORDER BY ls.created_at ASC`,
-      [actingUser.id]
+      [ownerId]
     );
     res.json(result.rows);
   } catch (err) {
@@ -64,16 +85,47 @@ router.get('/', async (req, res) => {
 });
 
 // POST /api/sessions
-// userId always comes from the authenticated session — never from the client.
+// By default, creates a session owned by (and created by) the authenticated
+// user — unchanged from before. Optionally accepts `targetUserId` in the
+// body so an admin/mentor can create a session owned by another user (e.g.
+// a mentor setting up a plan for an assigned student). Named to match the
+// `targetUserId` parameter of canCreateSessionForUser (utils/authz.js) —
+// authorization is always re-checked server-side, never trusted from the
+// frontend, even though nothing in the frontend sends this field yet.
 router.post('/', async (req, res) => {
   const actingUser = await getActingUser(req);
   if (!actingUser) {
     return res.status(401).json({ error: 'Not authenticated.' });
   }
 
-  const { name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [], datasetId } = req.body;
+  const { name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [], datasetId, targetUserId } = req.body;
   if (!name || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'Session name is required.' });
+  }
+
+  // ownerId defaults to the acting user — the exact pre-existing behavior —
+  // and is only ever changed after an explicit targetUserId passes both an
+  // existence check and canCreateSessionForUser.
+  let ownerId = actingUser.id;
+  const targetUserIdProvided = targetUserId !== undefined && targetUserId !== null && targetUserId !== '';
+
+  if (targetUserIdProvided) {
+    const parsedTargetId = parseInt(targetUserId, 10);
+    if (isNaN(parsedTargetId)) {
+      return res.status(400).json({ error: 'Invalid targetUserId.' });
+    }
+
+    const targetRow = await pool.query('SELECT id FROM users WHERE id = $1', [parsedTargetId]);
+    if (targetRow.rows.length === 0) {
+      return res.status(404).json({ error: 'Target user not found.' });
+    }
+
+    const allowed = await canCreateSessionForUser(actingUser, parsedTargetId);
+    if (!allowed) {
+      return res.status(403).json({ error: 'You do not have permission to create a session for this user.' });
+    }
+
+    ownerId = parsedTargetId;
   }
 
   const resolvedDatasetId = await resolveDatasetId(datasetId);
@@ -84,9 +136,9 @@ router.post('/', async (req, res) => {
     await client.query('BEGIN');
 
     const result = await client.query(
-      `INSERT INTO learning_sessions (user_id, name, description, plan_type, dataset_id)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [actingUser.id, name.trim(), description?.trim() || null, planType, resolvedDatasetId]
+      `INSERT INTO learning_sessions (user_id, created_by_user_id, name, description, plan_type, dataset_id)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [ownerId, actingUser.id, name.trim(), description?.trim() || null, planType, resolvedDatasetId]
     );
     const session = result.rows[0];
 

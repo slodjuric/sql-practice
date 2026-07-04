@@ -5,7 +5,29 @@ const { tasks, taskMap } = require('../data/taskRegistry');
 const { resolveSessionId } = require('../utils/contextResolvers');
 const { matchesSessionFilters, getSessionFilters } = require('../utils/taskFilters');
 const { getDatasetBySessionId } = require('../utils/datasetResolver');
-const { getActingUser } = require('../utils/authz');
+const { getActingUser, canAccessStudent } = require('../utils/authz');
+
+// Resolves the targetUserId query param against actingUser, following the
+// same rule used by GET /api/sessions (Step I.1): omitted => self, present
+// => must pass canAccessStudent. Returns { ownerId } on success, or
+// { error: { status, message } } to short-circuit the route.
+async function resolveOwnerId(actingUser, targetUserId) {
+  if (targetUserId === undefined || targetUserId === null || targetUserId === '') {
+    return { ownerId: actingUser.id };
+  }
+
+  const parsedTargetId = parseInt(targetUserId, 10);
+  if (isNaN(parsedTargetId)) {
+    return { error: { status: 400, message: 'Invalid targetUserId.' } };
+  }
+
+  const allowed = await canAccessStudent(actingUser, parsedTargetId);
+  if (!allowed) {
+    return { error: { status: 403, message: 'You do not have permission to view this user\'s progress.' } };
+  }
+
+  return { ownerId: parsedTargetId };
+}
 
 const PROJECT_LABELS = {
   'student-performance': 'Student Performance Analysis',
@@ -61,7 +83,11 @@ function buildGroupStats(taskList, progressMap, planType) {
 }
 
 // GET /api/progress/summary?sessionId=5
-// userId always comes from the authenticated session — never from the client.
+// By default, resolves progress for the authenticated user — unchanged from
+// before. Optionally accepts ?targetUserId=<id> so an admin/mentor can view
+// another authorized user's progress (e.g. a mentor viewing an assigned
+// student's progress). Authorization is always re-checked server-side via
+// canAccessStudent, never trusted from the query string.
 router.get('/summary', async (req, res) => {
   try {
     const actingUser = await getActingUser(req);
@@ -69,9 +95,14 @@ router.get('/summary', async (req, res) => {
       return res.status(401).json({ error: 'Not authenticated.' });
     }
 
+    const { ownerId, error } = await resolveOwnerId(actingUser, req.query.targetUserId);
+    if (error) return res.status(error.status).json({ error: error.message });
+
     // resolveSessionId verifies the provided sessionId actually belongs to
-    // actingUser (or picks their first session if none was provided).
-    const sessionId = await resolveSessionId(actingUser.id, req.query.sessionId);
+    // ownerId (or picks their first session if none was provided) — this is
+    // what prevents a sessionId for a different user from ever resolving,
+    // even if targetUserId itself was authorized.
+    const sessionId = await resolveSessionId(ownerId, req.query.sessionId);
 
     if (!sessionId) {
       const academicTasks = tasks.filter(t => !t.datasetKey || t.datasetKey === 'academic');
@@ -92,7 +123,7 @@ router.get('/summary', async (req, res) => {
         SELECT task_id, status, attempts_count
         FROM user_task_progress
         WHERE user_id = $1 AND session_id = $2
-      `, [actingUser.id, sessionId]),
+      `, [ownerId, sessionId]),
       // task_attempts — check answer history only (is_correct IS NOT NULL excludes Run Query rows)
       pool.query(`
         SELECT task_id, is_correct, created_at, submitted_sql
@@ -100,7 +131,7 @@ router.get('/summary', async (req, res) => {
         WHERE user_id = $1 AND session_id = $2
           AND is_correct IS NOT NULL
         ORDER BY created_at DESC
-      `, [actingUser.id, sessionId]),
+      `, [ownerId, sessionId]),
       getSessionFilters(sessionId),
       getDatasetBySessionId(sessionId),
     ]);
@@ -167,7 +198,8 @@ router.get('/summary', async (req, res) => {
 });
 
 // GET /api/progress/tasks-status?sessionId=5
-// userId always comes from the authenticated session — never from the client.
+// Same targetUserId behavior as GET /summary above — omitted means self,
+// present means an authorized admin/mentor view of another user's statuses.
 router.get('/tasks-status', async (req, res) => {
   try {
     const actingUser = await getActingUser(req);
@@ -175,7 +207,10 @@ router.get('/tasks-status', async (req, res) => {
       return res.status(401).json({ error: 'Not authenticated.' });
     }
 
-    const sessionId = await resolveSessionId(actingUser.id, req.query.sessionId);
+    const { ownerId, error } = await resolveOwnerId(actingUser, req.query.targetUserId);
+    if (error) return res.status(error.status).json({ error: error.message });
+
+    const sessionId = await resolveSessionId(ownerId, req.query.sessionId);
     if (!sessionId) return res.json({ statuses: {} });
 
     // user_task_progress = current task status source of truth
@@ -183,7 +218,7 @@ router.get('/tasks-status', async (req, res) => {
       SELECT task_id, status
       FROM user_task_progress
       WHERE user_id = $1 AND session_id = $2
-    `, [actingUser.id, sessionId]);
+    `, [ownerId, sessionId]);
 
     const statuses = {};
     for (const row of result.rows) statuses[row.task_id] = row.status;

@@ -53,10 +53,16 @@ function requireRole(...allowedRoles) {
  * Rule for now:
  *   - admin:   can reopen any session.
  *   - mentor:  can reopen any session — INTENTIONALLY BROAD AND TEMPORARY.
- *              There is no mentor_assignments table yet, so a mentor cannot
- *              currently be scoped to "their" students. Once that table
- *              exists, this must be narrowed to only sessions owned by
- *              students assigned to this mentor.
+ *              The mentor_assignments table now exists (see canAccessStudent
+ *              below), so the *correct* rule going forward is
+ *              `canAccessStudent(actingUser, session.user_id)` instead of a
+ *              blanket `true`. That rule requires a DB lookup, which makes
+ *              this function async — and its one caller
+ *              (PATCH /api/sessions/:id/reopen) currently calls it
+ *              synchronously. Changing that is a route-level change, out of
+ *              scope for this step (additive-only). Left unchanged
+ *              intentionally; narrowing this is the first thing the route
+ *              step touching sessions.js reopen logic should do.
  *   - student: can never reopen a completed session, not even their own.
  */
 function canReopenSession(actingUser, session) {
@@ -66,4 +72,84 @@ function canReopenSession(actingUser, session) {
   return false;
 }
 
-module.exports = { getActingUser, requireRole, canReopenSession };
+/**
+ * Account-level access check — can actingUser access targetUserId's own
+ * account (e.g. profile-level data)?
+ *
+ * This is NOT for student progress/session ownership — use
+ * canAccessStudent for that. Mentor cross-user access is intentionally NOT
+ * granted here, even for assigned students: a mentor never gets to act as
+ * "the account" of a student, only to view/manage their learning data via
+ * canAccessStudent/canViewSession.
+ *
+ * Rules:
+ *   - no actingUser        => false
+ *   - admin                => true
+ *   - same user id         => true
+ *   - anyone else          => false (includes mentor on any other user)
+ */
+function canAccessUser(actingUser, targetUserId) {
+  if (!actingUser) return false;
+  if (actingUser.role === 'admin') return true;
+  return actingUser.id === targetUserId;
+}
+
+/**
+ * Can actingUser view/manage studentId's sessions/progress?
+ *
+ * Requires a DB lookup for mentor role (checks mentor_assignments), so this
+ * function is async — unlike canAccessUser/canReopenSession.
+ *
+ * Rules:
+ *   - no actingUser  => false
+ *   - admin          => true
+ *   - same user id   => true (a student always "can access" themselves)
+ *   - mentor         => true only if a mentor_assignments row exists for
+ *                       (actingUser.id, studentId)
+ *   - anyone else    => false
+ */
+async function canAccessStudent(actingUser, studentId) {
+  if (!actingUser) return false;
+  if (actingUser.role === 'admin') return true;
+  if (actingUser.id === studentId) return true;
+  if (actingUser.role === 'mentor') {
+    const result = await pool.query(
+      'SELECT 1 FROM mentor_assignments WHERE mentor_id = $1 AND student_id = $2',
+      [actingUser.id, studentId]
+    );
+    return result.rows.length > 0;
+  }
+  return false;
+}
+
+/**
+ * Can actingUser create a session owned by targetUserId?
+ *
+ * For now, identical relationship to canAccessStudent: admin can create for
+ * anyone, mentor only for assigned students (or themselves), student only
+ * for themselves. Kept as a separate named function (rather than an alias)
+ * so creation and viewing permissions can diverge later without renaming
+ * every call site.
+ */
+async function canCreateSessionForUser(actingUser, targetUserId) {
+  return canAccessStudent(actingUser, targetUserId);
+}
+
+/**
+ * Can actingUser view/act on this specific session row?
+ * `session` needs at least a `user_id` field (the session's owner).
+ */
+async function canViewSession(actingUser, session) {
+  if (!session) return false;
+  return canAccessStudent(actingUser, session.user_id);
+}
+
+module.exports = {
+  getActingUser,
+  requireRole,
+  canReopenSession,
+  canAccessUser,
+  canAccessStudent,
+  canCreateSessionForUser,
+  canViewSession,
+};

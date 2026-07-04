@@ -207,13 +207,13 @@ async function run() {
       }
     }
 
-    // ── Case h: admin POST with no role defaults to student ──────────────────
+    // ── Case h: admin POST with no role (+ password) defaults to student ─────
     {
       const createdUsername = `${PREFIX}created_default`;
       const res = await fetch(usersBase, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
-        body: JSON.stringify({ username: createdUsername }),
+        body: JSON.stringify({ username: createdUsername, password: TEST_PASSWORD }),
       });
       const body = await res.json();
       const row = await findByUsername(createdUsername);
@@ -224,13 +224,13 @@ async function run() {
       }
     }
 
-    // ── Case i: admin POST with role=mentor creates a mentor ──────────────────
+    // ── Case i: admin POST with role=mentor (+ password) creates a mentor ────
     {
       const createdUsername = `${PREFIX}created_mentor`;
       const res = await fetch(usersBase, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
-        body: JSON.stringify({ username: createdUsername, role: 'mentor' }),
+        body: JSON.stringify({ username: createdUsername, role: 'mentor', password: TEST_PASSWORD }),
       });
       const body = await res.json();
       const row = await findByUsername(createdUsername);
@@ -247,7 +247,7 @@ async function run() {
       const res = await fetch(usersBase, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
-        body: JSON.stringify({ username: createdUsername, role: 'superadmin' }),
+        body: JSON.stringify({ username: createdUsername, role: 'superadmin', password: TEST_PASSWORD }),
       });
       const row = await findByUsername(createdUsername);
       if (res.status === 400 && !row) {
@@ -292,6 +292,91 @@ async function run() {
         }
       } else {
         console.log(`[l] SKIP — ${baselineAdmins} pre-existing admin(s) in this environment; cannot deterministically test the last-admin block without touching real users`);
+      }
+    }
+
+    // Fresh admin for the remaining cases — case l may have altered the
+    // original admin account's state (deleted, in the atypical environment
+    // where real admins already exist), so don't rely on adminCookie after it.
+    const admin2Username = `${PREFIX}admin2`;
+    await createUser(admin2Username, 'admin');
+    const { cookie: admin2Cookie } = await login(base, admin2Username, TEST_PASSWORD);
+
+    // ── Case m: admin creates a login-ready user; that user can log in ───────
+    {
+      const newUsername = `${PREFIX}loginready`;
+      const newPassword = 'a-fresh-password-123';
+      const createRes = await fetch(usersBase, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: admin2Cookie },
+        body: JSON.stringify({ username: newUsername, role: 'student', password: newPassword }),
+      });
+      const createBody = await createRes.json();
+      const loginRes = await fetch(`${base}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: newUsername, password: newPassword }),
+      });
+      const loginBody = await loginRes.json();
+      if (
+        createRes.status === 201 && !('password_hash' in createBody) &&
+        loginRes.status === 200 && loginBody.username === newUsername
+      ) {
+        pass('m', 'Admin-created user has a working password and password_hash is never returned (201 → login 200)');
+      } else {
+        fail('m', 'Admin-created user must be able to log in immediately, without password_hash leaking', `createStatus=${createRes.status}, createBody=${JSON.stringify(createBody)}, loginStatus=${loginRes.status}`);
+      }
+    }
+
+    // ── Case n: missing password is rejected ──────────────────────────────────
+    {
+      const newUsername = `${PREFIX}nopassword`;
+      const res = await fetch(usersBase, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: admin2Cookie },
+        body: JSON.stringify({ username: newUsername, role: 'student' }),
+      });
+      const row = await findByUsername(newUsername);
+      if (res.status === 400 && !row) {
+        pass('n', 'Missing password is rejected (400, no row created)');
+      } else {
+        fail('n', 'Missing password must be rejected', `status=${res.status}, rowCreated=${!!row}`);
+      }
+    }
+
+    // ── Case o: too-short password is rejected ────────────────────────────────
+    {
+      const newUsername = `${PREFIX}shortpassword`;
+      const res = await fetch(usersBase, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: admin2Cookie },
+        body: JSON.stringify({ username: newUsername, role: 'student', password: 'short' }),
+      });
+      const row = await findByUsername(newUsername);
+      if (res.status === 400 && !row) {
+        pass('o', 'Password shorter than 8 characters is rejected (400, no row created)');
+      } else {
+        fail('o', 'Too-short password must be rejected', `status=${res.status}, rowCreated=${!!row}`);
+      }
+    }
+
+    // ── Case p: duplicate username handling still works ───────────────────────
+    {
+      const dupUsername = `${PREFIX}duplicate`;
+      const firstRes = await fetch(usersBase, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: admin2Cookie },
+        body: JSON.stringify({ username: dupUsername, role: 'student', password: TEST_PASSWORD }),
+      });
+      const secondRes = await fetch(usersBase, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: admin2Cookie },
+        body: JSON.stringify({ username: dupUsername, role: 'student', password: TEST_PASSWORD }),
+      });
+      if (firstRes.status === 201 && secondRes.status === 409) {
+        pass('p', 'Duplicate username still returns 409 on the second attempt');
+      } else {
+        fail('p', 'Duplicate username must return 409', `firstStatus=${firstRes.status}, secondStatus=${secondRes.status}`);
       }
     }
 

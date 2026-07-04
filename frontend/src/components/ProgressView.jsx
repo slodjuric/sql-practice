@@ -195,7 +195,7 @@ function EditPlanForm({ activeSession, sessionFilters, onSave, onCancel }) {
 }
 
 // ── Session Summary Card ───────────────────────────────────────────────────
-function SessionSummaryCard({ activeUser, activeSession, summary, sessionFilters, onUpdateSession, isPlanEditOpen, setIsPlanEditOpen }) {
+function SessionSummaryCard({ activeUser, selectedStudent, activeSession, summary, sessionFilters, onUpdateSession, isPlanEditOpen, setIsPlanEditOpen }) {
   const [open, setOpen] = useState(true);
 
   if (!activeUser) {
@@ -285,7 +285,7 @@ function SessionSummaryCard({ activeUser, activeSession, summary, sessionFilters
               <div className="session-summary-grid">
                 <div className="session-summary-item">
                   <span className="session-summary-label">User</span>
-                  <span className="session-summary-value">{activeUser.username}</span>
+                  <span className="session-summary-value">{(selectedStudent || activeUser).username}</span>
                 </div>
                 {activeSession.dataset_name && (
                   <div className="session-summary-item">
@@ -377,7 +377,13 @@ function SessionSummaryCard({ activeUser, activeSession, summary, sessionFilters
 }
 
 // ── Progress View ──────────────────────────────────────────────────────────
-export default function ProgressView({ activeUser, activeSession, sessionFilters, onOpenTask, onOpenCategory, onUpdateSession, onNavigate, progressVersion, autoOpenPlanEditor, onAutoOpenPlanEditorConsumed }) {
+export default function ProgressView({ activeUser, selectedStudent, targetUserId, activeSession, sessionFilters, onOpenTask, onOpenCategory, onUpdateSession, onNavigate, progressVersion, autoOpenPlanEditor, onAutoOpenPlanEditorConsumed }) {
+  // Review mode: a professor viewing a selected student's progress. Practice
+  // is explicitly first-person-only (product decision, Step J) — every task/
+  // attempt/category entry point into Practice is guarded below rather than
+  // wiring targetUserId into Practice itself.
+  const reviewMode = !!selectedStudent;
+
   const [summary,        setSummary]        = useState(null);
   const [loading,        setLoading]        = useState(true);
   const [error,          setError]          = useState(null);
@@ -410,11 +416,11 @@ export default function ProgressView({ activeUser, activeSession, sessionFilters
   const load = useCallback(() => {
     setLoading(true);
     setError(null);
-    api.progress.summary(activeSession?.id)
+    api.progress.summary(activeSession?.id, targetUserId)
       .then(setSummary)
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
-  }, [activeSession, progressVersion]);
+  }, [activeSession, progressVersion, targetUserId]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -439,6 +445,7 @@ export default function ProgressView({ activeUser, activeSession, sessionFilters
   }
 
   function handleOpenTask(taskId, topicId) {
+    if (reviewMode) return; // Practice is first-person-only — see reviewMode above
     if (!taskId || !topicId) {
       console.warn('openTaskFromProgress: missing taskId or topicId');
       return;
@@ -447,6 +454,7 @@ export default function ProgressView({ activeUser, activeSession, sessionFilters
   }
 
   function handleOpenAttempt(group, attempt) {
+    if (reviewMode) return; // Practice is first-person-only — see reviewMode above
     if (!group.taskId || !group.topicId) return;
     onOpenTask?.({ taskId: group.taskId, topicId: group.topicId, attemptSql: attempt.submittedSql || null });
   }
@@ -505,11 +513,17 @@ export default function ProgressView({ activeUser, activeSession, sessionFilters
             ↻ Refresh
           </button>
         </div>
+        {reviewMode && (
+          <div className="progress-review-badge">
+            Review mode — viewing {selectedStudent.username}'s progress. Practice actions remain your own.
+          </div>
+        )}
       </div>
 
       <div className="page-body">
         <SessionSummaryCard
           activeUser={activeUser}
+          selectedStudent={selectedStudent}
           activeSession={activeSession}
           summary={summary}
           sessionFilters={sessionFilters}
@@ -555,7 +569,7 @@ export default function ProgressView({ activeUser, activeSession, sessionFilters
             {(byGroup ?? []).map(g => {
               const label    = g.groupLabel ?? TOPIC_LABELS[g.groupId] ?? g.groupId;
               const expanded = !!expandedTopics[g.groupId];
-              const canNav   = !!(g.canNavigate && onOpenCategory);
+              const canNav   = !!(g.canNavigate && onOpenCategory && !reviewMode);
               return (
                 <div key={g.groupId}>
                   <div
@@ -584,8 +598,9 @@ export default function ProgressView({ activeUser, activeSession, sessionFilters
                       {(g.tasks || []).map(task => (
                         <div
                           key={task.id}
-                          className="progress-topic-task-row progress-list-row--clickable"
-                          onClick={() => onOpenTask?.({ taskId: task.id, topicId: task.topicId })}
+                          className={`progress-topic-task-row${reviewMode ? '' : ' progress-list-row--clickable'}`}
+                          onClick={() => handleOpenTask(task.id, task.topicId)}
+                          title={reviewMode ? 'Practice unavailable in review mode' : undefined}
                         >
                           <div className="progress-list-info">
                             <div className="progress-list-title">{task.title}</div>
@@ -615,11 +630,15 @@ export default function ProgressView({ activeUser, activeSession, sessionFilters
           <div className="progress-empty-state">
             <h3 className="progress-empty-state-title">No activity yet — let's get started!</h3>
             <p className="progress-empty-state-text">
-              Pick a task from Practice to begin tracking your progress.
+              {reviewMode
+                ? "This student hasn't checked any answers yet."
+                : 'Pick a task from Practice to begin tracking your progress.'}
             </p>
-            <button className="btn btn-primary" onClick={() => onNavigate?.('practice')}>
-              Go to Practice
-            </button>
+            {!reviewMode && (
+              <button className="btn btn-primary" onClick={() => onNavigate?.('practice')}>
+                Go to Practice
+              </button>
+            )}
           </div>
         ) : (
         <div className="progress-bottom-grid">
@@ -663,13 +682,13 @@ export default function ProgressView({ activeUser, activeSession, sessionFilters
                           {group.attempts.map((attempt, idx) => {
                             const status = attempt.isCorrect === true  ? 'correct'
                                          : attempt.isCorrect === false ? 'wrong' : 'run';
-                            const canOpen = !!(group.taskId && group.topicId && attempt.submittedSql);
+                            const canOpen = !!(group.taskId && group.topicId && attempt.submittedSql) && !reviewMode;
                             return (
                               <div
                                 key={idx}
                                 className={`recent-attempt-detail-row${canOpen ? ' recent-attempt-detail-row--clickable' : ''}`}
                                 onClick={canOpen ? (e) => { e.stopPropagation(); handleOpenAttempt(group, attempt); } : undefined}
-                                title={canOpen ? 'Open this attempt' : undefined}
+                                title={reviewMode ? 'Practice unavailable in review mode' : (canOpen ? 'Open this attempt' : undefined)}
                               >
                                 <span className={`progress-badge ${
                                   status === 'correct' ? 'progress-badge--correct'   :
@@ -707,13 +726,13 @@ export default function ProgressView({ activeUser, activeSession, sessionFilters
             ) : (
               <div className="progress-list progress-list--scrollable">
                 {inProgressTasks.map(t => {
-                  const clickable = !!(t.taskId && t.topicId);
+                  const clickable = !!(t.taskId && t.topicId) && !reviewMode;
                   return (
                     <div
                       key={t.taskId}
                       className={`progress-list-row${clickable ? ' progress-list-row--clickable' : ''}`}
                       onClick={() => clickable && handleOpenTask(t.taskId, t.topicId)}
-                      title={clickable ? 'Open task' : undefined}
+                      title={reviewMode ? 'Practice unavailable in review mode' : (clickable ? 'Open task' : undefined)}
                     >
                       <div className="progress-list-info">
                         <div className="progress-list-title">{t.taskTitle}</div>

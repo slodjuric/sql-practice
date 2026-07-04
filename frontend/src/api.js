@@ -35,19 +35,43 @@ export const api = {
     me: () => request('/auth/me'),
   },
 
+  // Acting user is resolved from the session cookie — must be an admin (enforced backend-side).
   users: {
     list: () => request('/users'),
-    create: (username) => request('/users', { method: 'POST', body: JSON.stringify({ username }) }),
-    // Acting user is resolved from the session cookie — must be an admin (enforced backend-side).
+    create: (username, role, password) =>
+      request('/users', { method: 'POST', body: JSON.stringify({ username, role, password }) }),
     delete: (userId) => request(`/users/${userId}`, { method: 'DELETE' }),
   },
 
+  // Admin-only (enforced backend-side).
+  mentorAssignments: {
+    list: () => request('/mentor-assignments'),
+    create: (mentorId, studentId) =>
+      request('/mentor-assignments', { method: 'POST', body: JSON.stringify({ mentorId, studentId }) }),
+    delete: (assignmentId) => request(`/mentor-assignments/${assignmentId}`, { method: 'DELETE' }),
+  },
+
+  // Mentor-only (enforced backend-side) — the logged-in mentor's own assigned students.
+  mentorStudents: {
+    list: () => request('/mentor/students'),
+  },
+
   // userId is never sent — the backend resolves it from the session cookie
-  // and only ever acts on the caller's own sessions.
+  // and only ever acts on the caller's own sessions, unless targetUserId is
+  // explicitly passed (list/create), which the backend re-authorizes itself.
   sessions: {
-    list: () => request('/sessions'),
-    create: (name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [], datasetId = null) =>
-      request('/sessions', { method: 'POST', body: JSON.stringify({ name, description, planType, topics, difficulties, projects, categories, ...(datasetId ? { datasetId } : {}) }) }),
+    // targetUserId is optional — only sent when a professor is viewing a
+    // selected student's sessions (see App.jsx). Omitted entirely for
+    // normal self-viewing, so existing calls are unchanged.
+    list: (targetUserId) => {
+      const q = targetUserId ? `?targetUserId=${targetUserId}` : '';
+      return request(`/sessions${q}`);
+    },
+    // targetUserId is optional — only sent when a professor is creating a
+    // session for an assigned student (see App.jsx handleCreateSession).
+    // Omitted entirely for normal self-creation, so existing calls are unchanged.
+    create: (name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [], datasetId = null, targetUserId = null) =>
+      request('/sessions', { method: 'POST', body: JSON.stringify({ name, description, planType, topics, difficulties, projects, categories, ...(datasetId ? { datasetId } : {}), ...(targetUserId ? { targetUserId } : {}) }) }),
     filters: (sessionId) => request(`/sessions/${sessionId}/filters`),
     update: (sessionId, updates) =>
       request(`/sessions/${sessionId}`, { method: 'PATCH', body: JSON.stringify(updates) }),
@@ -87,15 +111,23 @@ export const api = {
       }),
     }),
 
-  // userId is never sent — the backend resolves it from the session cookie.
+  // userId is never sent — the backend resolves it from the session cookie,
+  // unless targetUserId is explicitly passed (a professor viewing a
+  // selected student), which the backend re-authorizes itself.
   progress: {
-    summary: (sessionId) => {
-      const q = sessionId ? `?sessionId=${sessionId}` : '';
-      return request(`/progress/summary${q}`);
+    summary: (sessionId, targetUserId) => {
+      const params = new URLSearchParams();
+      if (sessionId) params.set('sessionId', sessionId);
+      if (targetUserId) params.set('targetUserId', targetUserId);
+      const q = params.toString();
+      return request(`/progress/summary${q ? `?${q}` : ''}`);
     },
-    taskStatuses: (sessionId) => {
-      const q = sessionId ? `?sessionId=${sessionId}` : '';
-      return request(`/progress/tasks-status${q}`);
+    taskStatuses: (sessionId, targetUserId) => {
+      const params = new URLSearchParams();
+      if (sessionId) params.set('sessionId', sessionId);
+      if (targetUserId) params.set('targetUserId', targetUserId);
+      const q = params.toString();
+      return request(`/progress/tasks-status${q ? `?${q}` : ''}`);
     },
   },
 

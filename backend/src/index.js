@@ -20,6 +20,8 @@ const usersRouter = require('./routes/users');
 const sessionsRouter = require('./routes/sessions');
 const datasetsRouter = require('./routes/datasets');
 const authRouter = require('./routes/auth');
+const mentorAssignmentsRouter = require('./routes/mentorAssignments');
+const mentorStudentsRouter = require('./routes/mentorStudents');
 const pool = require('./db');
 const initDb = require('./initDb');
 
@@ -52,6 +54,8 @@ app.use('/api/tables', tablesRouter);
 app.use('/api/query', queryRouter);
 app.use('/api/tasks', tasksRouter);
 app.use('/api/progress', progressRouter);
+app.use('/api/mentor-assignments', mentorAssignmentsRouter);
+app.use('/api/mentor', mentorStudentsRouter);
 
 app.get('/api/health', async (req, res) => {
   try {

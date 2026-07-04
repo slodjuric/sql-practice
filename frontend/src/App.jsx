@@ -5,6 +5,8 @@ import PracticeView from './components/PracticeView';
 import DatabaseView from './components/DatabaseView';
 import QueryPlayground from './components/QueryPlayground';
 import ProgressView from './components/ProgressView';
+import UserManagementView from './components/UserManagementView';
+import MyStudentsView from './components/MyStudentsView';
 import { api } from './api';
 
 export default function App() {
@@ -29,6 +31,21 @@ export default function App() {
   const [progressVersion, setProgressVersion] = useState(0);
   const [openPlanEditorOnProgress, setOpenPlanEditorOnProgress] = useState(false);
 
+  // ── Selected student context (professor viewing a student) ────
+  // Purely a UI context flag for now — { id, username, role } of the
+  // student a professor clicked into from My Students. NOT the acting
+  // identity: activeUser always stays the logged-in user. No API call in
+  // this step reads selectedStudent — Progress/Sessions/Practice still
+  // fetch the logged-in user's own data until a later step wires it up.
+  const [selectedStudent, setSelectedStudent] = useState(null);
+
+  // Only students are structurally barred from ever having a selected
+  // student (there is no UI path for them to set one, but this guards
+  // against a stale value surviving a role change without a full reload).
+  useEffect(() => {
+    if (activeUser?.role === 'student') setSelectedStudent(null);
+  }, [activeUser?.role]);
+
   // Check for an existing session on mount — a 401 here just means
   // "not logged in yet", not an application error, so it's handled silently.
   useEffect(() => {
@@ -38,17 +55,45 @@ export default function App() {
       .finally(() => setAuthLoading(false));
   }, []);
 
-  // Load sessions whenever active user changes
+  // Default landing page for professors, and clearing any selected-student
+  // context from a previous login — both keyed on activeUser?.id so they
+  // only fire when the logged-in user actually changes, never on every
+  // activeUser re-render or on in-session navigation.
   useEffect(() => {
+    setSelectedStudent(null);
+    if (activeUser?.role === 'mentor') {
+      setCurrentView('my-students');
+    }
+  }, [activeUser?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Loads sessions for the current "session context": the selected
+  // student's sessions when a professor is viewing one, otherwise the
+  // logged-in user's own sessions. Shared by the effect below and by
+  // handleCreateSession's post-create refresh for a selected student.
+  function loadSessionsForContext() {
     if (!activeUser) {
       setSessions([]);
       setActiveSession(null);
-      return;
+      return Promise.resolve();
     }
 
-    api.sessions.list()
+    const targetUserId = (activeUser.role === 'mentor' && selectedStudent) ? selectedStudent.id : null;
+
+    return api.sessions.list(targetUserId)
       .then(list => {
         setSessions(list);
+
+        if (targetUserId) {
+          // Viewing a student's sessions for display only — do not call
+          // api.sessions.open (that PATCH route is unchanged this step and
+          // scoped to the acting user's own sessions), and don't persist to
+          // localStorage since this isn't the professor's own last-used session.
+          const byLastOpened = list
+            .filter(s => s.last_opened_at)
+            .sort((a, b) => new Date(b.last_opened_at) - new Date(a.last_opened_at));
+          setActiveSession(byLastOpened[0] || list[0] || null);
+          return;
+        }
 
         const key     = `activeSessionId:user:${activeUser.id}`;
         const savedId = localStorage.getItem(key);
@@ -68,7 +113,14 @@ export default function App() {
         if (picked) api.sessions.open(picked.id).catch(() => {});
       })
       .catch(() => {});
-  }, [activeUser]);
+  }
+
+  // Reloads whenever the logged-in user or the selected-student context
+  // changes — covers login/logout, a professor selecting a student, and a
+  // professor clearing that selection back to their own sessions.
+  useEffect(() => {
+    loadSessionsForContext();
+  }, [activeUser, selectedStudent]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load filters whenever the active session changes.
   // Also clear the selected table so DatabaseView never loads a stale table
@@ -98,6 +150,7 @@ export default function App() {
     setActiveUser(null);
     setSessions([]);
     setActiveSession(null);
+    setSelectedStudent(null);
     setCurrentView('progress');
   }
 
@@ -115,20 +168,44 @@ export default function App() {
     setActiveUser(null);
     setSessions([]);
     setActiveSession(null);
+    setSelectedStudent(null);
     setCurrentView('progress');
   }
 
   // ── Session management ──────────────────────────────────────
   function handleSessionChange(session) {
     setActiveSession(session);
-    if (session && activeUser) {
-      localStorage.setItem(`activeSessionId:user:${activeUser.id}`, String(session.id));
-      api.sessions.open(session.id).catch(() => {});
-    }
+    if (!session || !activeUser) return;
+
+    // Sessions shown while viewing a selected student belong to that
+    // student, not the professor — PATCH /:id/open is unchanged this step
+    // and scoped to the acting user's own sessions, so skip it (it would
+    // just 404) and don't persist it under the professor's own localStorage key.
+    if (activeUser.role === 'mentor' && selectedStudent) return;
+
+    localStorage.setItem(`activeSessionId:user:${activeUser.id}`, String(session.id));
+    api.sessions.open(session.id).catch(() => {});
   }
 
   async function handleCreateSession(name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [], datasetId = null) {
-    const { session, filters } = await api.sessions.create(name, description, planType, topics, difficulties, projects, categories, datasetId);
+    // Only a professor with a selected student targets someone else — every
+    // other case (student, admin, professor with no selection) omits
+    // targetUserId and keeps the exact self-creation behavior from before.
+    const targetUserId = (activeUser?.role === 'mentor' && selectedStudent) ? selectedStudent.id : null;
+    const { session, filters } = await api.sessions.create(name, description, planType, topics, difficulties, projects, categories, datasetId, targetUserId);
+
+    if (targetUserId) {
+      // The created session belongs to the student, not the professor.
+      // GET /api/sessions can now read the selected student's sessions
+      // (this step), so refresh that list to show the new session — but
+      // deliberately do not auto-select/open it: Progress still isn't
+      // wired to the selected student, so forcing it "active" wouldn't
+      // show anything meaningful yet. loadSessionsForContext's normal
+      // "most recently opened, else first" pick decides on its own.
+      await loadSessionsForContext();
+      return { session, filters, createdForStudent: true };
+    }
+
     setSessions(prev => [...prev, session]);
     handleSessionChange(session);
     setSessionFilters(filters);
@@ -203,7 +280,29 @@ export default function App() {
       setPracticeTarget(null);
       setPracticeCategory(null);
     }
+    // Going back to My Students is treated as leaving the selected-student
+    // context, so a professor doesn't land back on Progress still "viewing"
+    // a student they navigated away from.
+    if (view === 'my-students') {
+      setSelectedStudent(null);
+    }
     setCurrentView(view);
+  }
+
+  // Sets selected-student context from My Students and jumps to Progress.
+  // Progress does not yet fetch this student's data (Step F is context-only
+  // — see the viewing banner below); that wiring is a later step.
+  function handleSelectStudent(student) {
+    if (activeUser?.role !== 'mentor' || !student) return;
+    setSelectedStudent({ id: student.id, username: student.username, role: student.role });
+    handleNavigate('progress');
+  }
+
+  function handleClearSelectedStudent() {
+    setSelectedStudent(null);
+    if (activeUser?.role === 'mentor') {
+      handleNavigate('my-students');
+    }
   }
 
   function openTaskFromProgress({ taskId, topicId, attemptSql }) {
@@ -262,10 +361,16 @@ export default function App() {
             activeSession={activeSession}
           />
         );
-      case 'progress':
+      case 'progress': {
+        // Only a professor with a selected student views someone else's
+        // progress — every other case (student, admin, professor with no
+        // selection) omits targetUserId and sees their own, unchanged.
+        const progressTargetUserId = (activeUser?.role === 'mentor' && selectedStudent) ? selectedStudent.id : null;
         return (
           <ProgressView
             activeUser={activeUser}
+            selectedStudent={progressTargetUserId ? selectedStudent : null}
+            targetUserId={progressTargetUserId}
             activeSession={activeSession}
             sessionFilters={sessionFilters}
             onOpenTask={openTaskFromProgress}
@@ -277,6 +382,13 @@ export default function App() {
             onAutoOpenPlanEditorConsumed={() => setOpenPlanEditorOnProgress(false)}
           />
         );
+      }
+      case 'users':
+        return activeUser?.role === 'admin' ? <UserManagementView /> : null;
+      case 'my-students':
+        return activeUser?.role === 'mentor'
+          ? <MyStudentsView onSelectStudent={handleSelectStudent} />
+          : null;
       default:
         return <PracticeView activeUser={activeUser} activeSession={activeSession} />;
     }
@@ -308,8 +420,20 @@ export default function App() {
         onCompleteSession={handleCompleteSession}
         onReopenSession={handleReopenSession}
         canReopenSession={canReopenSession(activeUser)}
+        selectedStudent={activeUser?.role === 'mentor' ? selectedStudent : null}
       />
       <main className="main-content">
+        {selectedStudent && activeUser?.role !== 'student' && (
+          <div className="viewing-banner">
+            <span className="viewing-banner-text">
+              Viewing student: <strong>{selectedStudent.username}</strong>.
+              {' '}Sessions and Progress are connected. Practice actions remain your own.
+            </span>
+            <button className="viewing-banner-clear" onClick={handleClearSelectedStudent}>
+              {activeUser?.role === 'mentor' ? 'Back to My Students' : 'Clear selection'}
+            </button>
+          </div>
+        )}
         {renderView()}
       </main>
     </div>
