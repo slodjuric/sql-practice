@@ -105,8 +105,8 @@ async function run() {
       await canCreateSessionForUser(mentor, assignedStudent.id), true);
     check('13', 'mentor canCreateSessionForUser(unassigned student) => false',
       await canCreateSessionForUser(mentor, unassignedStudent.id), false);
-    check('14', 'student canCreateSessionForUser(self) => true',
-      await canCreateSessionForUser(assignedStudent, assignedStudent.id), true);
+    check('14', 'student canCreateSessionForUser(self) => false (students can never create sessions)',
+      await canCreateSessionForUser(assignedStudent, assignedStudent.id), false);
     check('15', 'student canCreateSessionForUser(other student) => false',
       await canCreateSessionForUser(assignedStudent, otherStudent.id), false);
     check('16', 'admin canCreateSessionForUser(any) => true',

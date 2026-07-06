@@ -104,6 +104,21 @@ async function createSession(base, cookie, name, targetUserId) {
   return res.json();
 }
 
+// Seeds a session directly in the DB, bypassing POST /api/sessions — needed
+// for student-owned fixture sessions, since students can no longer create
+// sessions via the route at all (bug fix; see check-session-create-for-user.js).
+// This script tests the read path only, so a direct seed is appropriate here.
+// Returns the same { session: { id } } shape as the POST-based createSession
+// helper, so call sites don't need to change.
+async function seedSessionDirect(ownerId, name) {
+  const dataset = await pool.query("SELECT id FROM datasets WHERE key = 'academic'");
+  const r = await pool.query(
+    'INSERT INTO learning_sessions (user_id, created_by_user_id, name, dataset_id) VALUES ($1, $1, $2, $3) RETURNING id',
+    [ownerId, name, dataset.rows[0].id]
+  );
+  return { session: { id: r.rows[0].id } };
+}
+
 async function getSummary(base, cookie, { targetUserId, sessionId } = {}) {
   const params = new URLSearchParams();
   if (targetUserId !== undefined) params.set('targetUserId', targetUserId);
@@ -165,17 +180,18 @@ async function run() {
     );
 
     const { cookie: studentACookie } = await login(base, studentAUsername, TEST_PASSWORD);
-    const { cookie: studentBCookie } = await login(base, studentBUsername, TEST_PASSWORD);
     const { cookie: mentorCookie } = await login(base, mentorUsername, TEST_PASSWORD);
     const { cookie: adminCookie } = await login(base, adminUsername, TEST_PASSWORD);
 
-    // Seed one session each for studentA and mentor (self-owned)
-    await createSession(base, studentACookie, `${PREFIX}studentA_own`);
+    // Seed one session each for studentA and mentor (self-owned). Student
+    // sessions are seeded directly (bypassing POST) since students can no
+    // longer create sessions at all; mentor's still goes through the real route.
+    await seedSessionDirect(studentAId, `${PREFIX}studentA_own`);
     await createSession(base, mentorCookie, `${PREFIX}mentor_own`);
     // Mentor creates a session for the assigned student
     const mentorCreatedForStudent = await createSession(base, mentorCookie, `${PREFIX}mentorCreatedForStudent`, assignedStudentId);
     // Seed a session for studentB, used as the "belongs to someone else" probe
-    const studentBSession = await createSession(base, studentBCookie, `${PREFIX}studentB_own`);
+    const studentBSession = await seedSessionDirect(studentBId, `${PREFIX}studentB_own`);
 
     // ── Case a: student summary with no targetUserId works for self ───────────
     {

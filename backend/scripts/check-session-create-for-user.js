@@ -148,23 +148,25 @@ async function run() {
     const { cookie: mentorCookie } = await login(base, mentorUsername, TEST_PASSWORD);
     const { cookie: adminCookie } = await login(base, adminUsername, TEST_PASSWORD);
 
-    // ── Case a: student creates session for self without targetUserId ─────────
+    // ── Case a: student cannot create a session for self, even with no targetUserId ──
+    // Product rule (bug fix, post-launch): students select existing sessions
+    // only — they can never create one, not even their own.
     {
       const { res, body } = await createSession(base, studentACookie, `${PREFIX}a`);
-      if (res.status === 201 && body.session?.user_id === studentAId) {
-        pass('a', 'Student creates a session for self with no targetUserId (201, existing behavior)');
+      if (res.status === 403) {
+        pass('a', 'Student cannot create a session for self with no targetUserId (403)');
       } else {
-        fail('a', 'Student must be able to create a session for self as before', `status=${res.status}, body=${JSON.stringify(body)}`);
+        fail('a', 'Student must never be able to create a session', `status=${res.status}, body=${JSON.stringify(body)}`);
       }
     }
 
-    // ── Case b: student creates session for self WITH own targetUserId ────────
+    // ── Case b: student cannot create a session for self WITH own targetUserId ──
     {
       const { res, body } = await createSession(base, studentACookie, `${PREFIX}b`, studentAId);
-      if (res.status === 201 && body.session?.user_id === studentAId) {
-        pass('b', 'Student creates a session for self using their own targetUserId (201)');
+      if (res.status === 403) {
+        pass('b', 'Student cannot create a session for self using their own targetUserId (403)');
       } else {
-        fail('b', 'Student targeting themselves must succeed', `status=${res.status}, body=${JSON.stringify(body)}`);
+        fail('b', 'Student targeting themselves must still be forbidden', `status=${res.status}, body=${JSON.stringify(body)}`);
       }
     }
 
@@ -231,10 +233,12 @@ async function run() {
     }
 
     // ── Case i: self-created session has user_id === created_by_user_id ───────
+    // Uses the mentor (not a student — students can no longer self-create at
+    // all, see cases a/b) to verify the general self-creation ownership invariant.
     {
-      const { body } = await createSession(base, studentACookie, `${PREFIX}i`);
+      const { body } = await createSession(base, mentorCookie, `${PREFIX}i`);
       const row = await getSessionRow(body.session?.id);
-      if (row && row.user_id === studentAId && row.created_by_user_id === studentAId) {
+      if (row && row.user_id === mentorId && row.created_by_user_id === mentorId) {
         pass('i', `Self-created session: user_id=${row.user_id} === created_by_user_id=${row.created_by_user_id}`);
       } else {
         fail('i', 'Self-created session must have user_id === created_by_user_id', `row=${JSON.stringify(row)}`);

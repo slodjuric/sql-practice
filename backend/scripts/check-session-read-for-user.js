@@ -109,6 +109,19 @@ async function listSessions(base, cookie, targetUserId) {
   return { res, body };
 }
 
+// Seeds a session directly in the DB, bypassing POST /api/sessions — needed
+// for a student-owned fixture session, since students can no longer create
+// sessions via the route at all (bug fix; see check-session-create-for-user.js).
+// This script tests the read path only, so a direct seed is appropriate here.
+async function seedSessionDirect(ownerId, name) {
+  const dataset = await pool.query("SELECT id FROM datasets WHERE key = 'academic'");
+  const r = await pool.query(
+    'INSERT INTO learning_sessions (user_id, created_by_user_id, name, dataset_id) VALUES ($1, $1, $2, $3) RETURNING id',
+    [ownerId, name, dataset.rows[0].id]
+  );
+  return r.rows[0].id;
+}
+
 async function run() {
   await cleanup();
 
@@ -152,8 +165,10 @@ async function run() {
     const { cookie: mentorCookie } = await login(base, mentorUsername, TEST_PASSWORD);
     const { cookie: adminCookie } = await login(base, adminUsername, TEST_PASSWORD);
 
-    // Seed one session each for studentA (self-owned) and mentor (self-owned)
-    await createSession(base, studentACookie, `${PREFIX}studentA_own`);
+    // Seed one session each for studentA (self-owned) and mentor (self-owned).
+    // studentA's is seeded directly (bypassing POST) since students can no
+    // longer create sessions at all; mentor's still goes through the real route.
+    await seedSessionDirect(studentAId, `${PREFIX}studentA_own`);
     await createSession(base, mentorCookie, `${PREFIX}mentor_own`);
 
     // ── Case a: student GET with no targetUserId returns own sessions ─────────
