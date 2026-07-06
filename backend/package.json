@@ -30,6 +30,7 @@
     "test:session-create-for-user": "node scripts/check-session-create-for-user.js",
     "test:session-read-for-user": "node scripts/check-session-read-for-user.js",
     "test:progress-read-for-user": "node scripts/check-progress-read-for-user.js",
+    "test:session-creator-delete": "node scripts/check-session-creator-delete.js",
     "test:session-archive-authz": "node scripts/check-session-archive-authz.js",
     "test:query-limits": "node scripts/check-query-limits.js",
     "db:init": "node scripts/run-sql-file.js",
