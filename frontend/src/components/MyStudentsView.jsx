@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api } from '../api';
 import { roleLabel } from '../utils/roleLabels';
+import { fetchStudentStats, formatDateShort } from '../utils/studentRoster';
 
 export default function MyStudentsView({ onSelectStudent }) {
   const [students, setStudents] = useState([]);
@@ -8,12 +9,22 @@ export default function MyStudentsView({ onSelectStudent }) {
   const [error, setError] = useState(null);
 
   useEffect(() => {
+    let cancelled = false;
     setLoading(true);
     setError(null);
+
     api.mentorStudents.list()
-      .then(setStudents)
-      .catch(err => setError(err.message))
-      .finally(() => setLoading(false));
+      .then(async (list) => {
+        const withSummaries = await Promise.all(list.map(async (s) => ({
+          ...s,
+          ...(await fetchStudentStats(s.id)),
+        })));
+        if (!cancelled) setStudents(withSummaries);
+      })
+      .catch(err => { if (!cancelled) setError(err.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+
+    return () => { cancelled = true; };
   }, []);
 
   return (
@@ -37,6 +48,9 @@ export default function MyStudentsView({ onSelectStudent }) {
                 <th>Username</th>
                 <th>Role</th>
                 <th>Assigned</th>
+                <th>Solved / Total</th>
+                <th>Sessions</th>
+                <th>Last activity</th>
                 <th></th>
               </tr>
             </thead>
@@ -46,6 +60,9 @@ export default function MyStudentsView({ onSelectStudent }) {
                   <td>{s.username}</td>
                   <td>{roleLabel(s.role)}</td>
                   <td>{new Date(s.assigned_at).toLocaleString()}</td>
+                  <td>{s.totalTasks == null ? '—' : `${s.solved} / ${s.totalTasks}`}</td>
+                  <td>{s.sessionCount}</td>
+                  <td>{formatDateShort(s.lastActivity)}</td>
                   <td>
                     <button
                       type="button"

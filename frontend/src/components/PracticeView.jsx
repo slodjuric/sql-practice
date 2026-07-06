@@ -101,6 +101,10 @@ export default function PracticeView({
   onPracticeCategoryConsumed,
   onProgressInvalidate,
   onBackToProgress,
+  // Display-only, from a mentor/admin reaching here via a reviewed student's
+  // task list — never read for any API call. Run Query/Check Answer below
+  // stay hard-scoped to activeUser/activeSession no matter what this is.
+  viewedUser,
 }) {
   const [selectedGroup,     setSelectedGroup]     = useState(null);
   const [selectedItem,      setSelectedItem]      = useState(null);
@@ -246,29 +250,36 @@ export default function PracticeView({
   // ── Task view ──────────────────────────────────────────────
   if (selectedTaskId) {
     return (
-      <TaskView
-        activeUser={activeUser}
-        activeSession={activeSession}
-        sessionFilters={sessionFilters}
-        taskId={selectedTaskId}
-        onBack={closeTask}
-        category={selectedItem?.title}
-        onBackToCategories={goHome}
-        tableToOpenInTask={tableToOpenInTask}
-        onTableOpened={onTableOpened}
-        executionCache={taskExecutionCache[selectedTaskId] ?? null}
-        onExecutionCacheUpdate={(id, entry) =>
-          setTaskExecutionCache(prev => ({ ...prev, [id]: entry }))
-        }
-        taskStatus={taskStatuses[selectedTaskId] ?? 'not_started'}
-        onStatusChange={handleTaskStatusChange}
-        refreshTaskStatuses={loadStatuses}
-        initialAttemptSql={initialAttemptSql}
-        onInitialAttemptSqlConsumed={() => setInitialAttemptSql(null)}
-        onProgressInvalidate={onProgressInvalidate}
-        origin={taskOrigin}
-        onBackToProgress={onBackToProgress}
-      />
+      <>
+        {viewedUser && (
+          <div className="practice-review-notice">
+            You are reviewing <strong>{viewedUser.username}</strong>. Running or checking here affects only your own account, not this student.
+          </div>
+        )}
+        <TaskView
+          activeUser={activeUser}
+          activeSession={activeSession}
+          sessionFilters={sessionFilters}
+          taskId={selectedTaskId}
+          onBack={closeTask}
+          category={selectedItem?.title}
+          onBackToCategories={goHome}
+          tableToOpenInTask={tableToOpenInTask}
+          onTableOpened={onTableOpened}
+          executionCache={taskExecutionCache[selectedTaskId] ?? null}
+          onExecutionCacheUpdate={(id, entry) =>
+            setTaskExecutionCache(prev => ({ ...prev, [id]: entry }))
+          }
+          taskStatus={taskStatuses[selectedTaskId] ?? 'not_started'}
+          onStatusChange={handleTaskStatusChange}
+          refreshTaskStatuses={loadStatuses}
+          initialAttemptSql={initialAttemptSql}
+          onInitialAttemptSqlConsumed={() => setInitialAttemptSql(null)}
+          onProgressInvalidate={onProgressInvalidate}
+          origin={taskOrigin}
+          onBackToProgress={onBackToProgress}
+        />
+      </>
     );
   }
 

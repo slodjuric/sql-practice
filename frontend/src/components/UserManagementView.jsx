@@ -5,7 +5,17 @@ import { roleLabel } from '../utils/roleLabels';
 const ROLE_OPTIONS = ['student', 'mentor', 'admin'];
 const MIN_PASSWORD_LENGTH = 8;
 
-export default function UserManagementView() {
+// Reviewing a student shows their progress; reviewing a mentor shows their
+// assigned-student roster (Mentor Overview), not their own sessions — the
+// button label should set that expectation up front instead of a generic
+// "Review" that implies the same thing for every row.
+function reviewLabel(role) {
+  if (role === 'student') return 'Review progress';
+  if (role === 'mentor')  return 'View students';
+  return 'View activity';
+}
+
+export default function UserManagementView({ onReviewUser }) {
   const [activeTab, setActiveTab] = useState('users');
 
   const [users, setUsers] = useState([]);
@@ -265,6 +275,7 @@ export default function UserManagementView() {
                   <th>Username</th>
                   <th>Role</th>
                   <th>Created</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
@@ -273,6 +284,15 @@ export default function UserManagementView() {
                     <td>{u.username}</td>
                     <td>{roleLabel(u.role)}</td>
                     <td>{new Date(u.created_at).toLocaleString()}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="user-mgmt-review-btn user-mgmt-view-student-btn"
+                        onClick={() => onReviewUser?.(u)}
+                      >
+                        {reviewLabel(u.role)}
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
