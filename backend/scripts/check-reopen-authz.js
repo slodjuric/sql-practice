@@ -10,6 +10,10 @@
  * matching how getActingUser()/canReopenSession() resolve identity in
  * production.
  *
+ * canReopenSession is now narrowed to use canAccessStudent for the mentor
+ * case (own session, or an assigned student's — never an unassigned
+ * student's), replacing the old blanket "mentor can reopen anything" rule.
+ *
  * Requires a live DB connection (reads DB config from backend/.env).
  *
  * Run: npm run test:reopen-authz
@@ -45,6 +49,10 @@ async function cleanup() {
   // in case a failed run left orphaned rows under a different owner.
   await pool.query(
     "DELETE FROM learning_sessions WHERE name LIKE $1",
+    [`${PREFIX}%`]
+  );
+  await pool.query(
+    'DELETE FROM mentor_assignments WHERE mentor_id IN (SELECT id FROM users WHERE username LIKE $1) OR student_id IN (SELECT id FROM users WHERE username LIKE $1)',
     [`${PREFIX}%`]
   );
   await pool.query('DELETE FROM users WHERE username LIKE $1', [`${PREFIX}%`]);
@@ -112,20 +120,32 @@ async function run() {
     const base = `http://localhost:${server.address().port}`;
     const sessionsBase = `${base}/api/sessions`;
 
-    // ── Setup: one logged-in-capable acting user per role, two session owners ─
-    const adminUsername    = `${PREFIX}admin`;
-    const mentorUsername   = `${PREFIX}mentor`;
-    const studentAUsername = `${PREFIX}studentA`;
-    const adminId    = await createUser(adminUsername,    'admin');
-    const mentorId   = await createUser(mentorUsername,   'mentor');
-    const studentAId = await createUser(studentAUsername, 'student');
-    const studentBId = await createUser(`${PREFIX}studentB`, 'student');
+    // ── Setup: admin, mentor, an assigned student, and two unrelated students ─
+    const adminUsername          = `${PREFIX}admin`;
+    const mentorUsername         = `${PREFIX}mentor`;
+    const studentAUsername       = `${PREFIX}studentA`;
+    const assignedStudentUsername = `${PREFIX}assignedStudent`;
 
-    const sessionOwnA1 = await createCompletedSession(studentAId, `${PREFIX}session_a1`);
-    const sessionOwnB1 = await createCompletedSession(studentBId, `${PREFIX}session_b1`);
-    const sessionOwnB2 = await createCompletedSession(studentBId, `${PREFIX}session_b2`);
-    const sessionOwnB3 = await createCompletedSession(studentBId, `${PREFIX}session_b3`);
-    const sessionOwnB4 = await createCompletedSession(studentBId, `${PREFIX}session_b4`);
+    const adminId           = await createUser(adminUsername,           'admin');
+    const mentorId          = await createUser(mentorUsername,          'mentor');
+    const studentAId        = await createUser(studentAUsername,        'student');
+    const assignedStudentId = await createUser(assignedStudentUsername, 'student');
+    const studentBId        = await createUser(`${PREFIX}studentB`,     'student');
+
+    await pool.query(
+      'INSERT INTO mentor_assignments (mentor_id, student_id) VALUES ($1, $2)',
+      [mentorId, assignedStudentId]
+    );
+
+    const sessionOwnA1     = await createCompletedSession(studentAId,        `${PREFIX}session_a1`);
+    const sessionOwnB1     = await createCompletedSession(studentBId,        `${PREFIX}session_b1`);
+    const sessionOwnB2     = await createCompletedSession(studentBId,        `${PREFIX}session_b2`);
+    const sessionUnassigned = await createCompletedSession(studentBId,       `${PREFIX}session_unassigned`);
+    const sessionOwnB4     = await createCompletedSession(studentBId,        `${PREFIX}session_b4`);
+    const sessionOwnB5     = await createCompletedSession(studentBId,        `${PREFIX}session_b5`);
+    const sessionMentorOwn  = await createCompletedSession(mentorId,         `${PREFIX}session_mentor_own`);
+    const sessionAssigned   = await createCompletedSession(assignedStudentId, `${PREFIX}session_assigned`);
+    const sessionForFieldCheck = await createCompletedSession(assignedStudentId, `${PREFIX}session_field_check`);
 
     // ── Case a: logged-in student cannot reopen own completed session ────────
     {
@@ -165,51 +185,100 @@ async function run() {
       }
     }
 
-    // ── Case d: logged-in mentor can reopen a completed session (temporary) ──
+    // ── Case d: mentor can reopen their own completed session ────────────────
     {
       const { cookie } = await login(base, mentorUsername, TEST_PASSWORD);
-      const res = await fetch(`${sessionsBase}/${sessionOwnB3}/reopen`, { method: 'PATCH', headers: { Cookie: cookie } });
-      const status = await sessionStatus(sessionOwnB3);
+      const res = await fetch(`${sessionsBase}/${sessionMentorOwn}/reopen`, { method: 'PATCH', headers: { Cookie: cookie } });
+      const status = await sessionStatus(sessionMentorOwn);
       if (res.status === 200 && status === 'active') {
-        pass('d', 'Logged-in mentor can reopen a completed session (200, status=active, temporary rule)');
+        pass('d', 'Mentor can reopen their own completed session (200, status=active)');
       } else {
-        fail('d', 'Mentor must be able to reopen a completed session (temporary rule)', `httpStatus=${res.status}, dbStatus=${status}`);
+        fail('d', 'Mentor must be able to reopen their own session', `httpStatus=${res.status}, dbStatus=${status}`);
       }
     }
 
-    // ── Case e: no login at all returns 401 ────────────────────────────────────
+    // ── Case e: mentor can reopen an assigned student's completed session ────
+    {
+      const { cookie } = await login(base, mentorUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/${sessionAssigned}/reopen`, { method: 'PATCH', headers: { Cookie: cookie } });
+      const status = await sessionStatus(sessionAssigned);
+      if (res.status === 200 && status === 'active') {
+        pass('e', "Mentor can reopen an assigned student's completed session (200, status=active)");
+      } else {
+        fail('e', "Mentor must be able to reopen an assigned student's session", `httpStatus=${res.status}, dbStatus=${status}`);
+      }
+    }
+
+    // ── Case f: mentor cannot reopen an unassigned student's session (narrowed) ──
+    {
+      const { cookie } = await login(base, mentorUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/${sessionUnassigned}/reopen`, { method: 'PATCH', headers: { Cookie: cookie } });
+      const status = await sessionStatus(sessionUnassigned);
+      if (res.status === 403 && status === 'completed') {
+        pass('f', "Mentor cannot reopen an unassigned student's session (403, status unchanged) — narrowed rule");
+      } else {
+        fail('f', "Mentor must not be able to reopen an unassigned student's session", `httpStatus=${res.status}, dbStatus=${status}`);
+      }
+    }
+
+    // ── Case g: no login at all returns 401 ────────────────────────────────────
     {
       const res = await fetch(`${sessionsBase}/${sessionOwnB4}/reopen`, { method: 'PATCH' });
       const status = await sessionStatus(sessionOwnB4);
       if (res.status === 401 && status === 'completed') {
-        pass('e', 'No login at all returns 401 (status unchanged)');
+        pass('g', 'No login at all returns 401 (status unchanged)');
       } else {
-        fail('e', 'No login must return 401', `httpStatus=${res.status}, dbStatus=${status}`);
+        fail('g', 'No login must return 401', `httpStatus=${res.status}, dbStatus=${status}`);
       }
     }
 
-    // ── Case f: nonexistent session id returns 404 ─────────────────────────────
+    // ── Case h: nonexistent session id returns 404 ─────────────────────────────
     {
       const { cookie } = await login(base, adminUsername, TEST_PASSWORD);
       const res = await fetch(`${sessionsBase}/999999999/reopen`, { method: 'PATCH', headers: { Cookie: cookie } });
       if (res.status === 404) {
-        pass('f', 'Nonexistent session id returns 404');
+        pass('h', 'Nonexistent session id returns 404');
       } else {
-        fail('f', 'Nonexistent session id must return 404', `httpStatus=${res.status}`);
+        fail('h', 'Nonexistent session id must return 404', `httpStatus=${res.status}`);
       }
     }
 
-    // ── Case g (bonus): a garbage/tampered cookie is treated as no session ───
+    // ── Case i (bonus): a garbage/tampered cookie is treated as no session ───
     {
-      const res = await fetch(`${sessionsBase}/${sessionOwnB4}/reopen`, {
+      const res = await fetch(`${sessionsBase}/${sessionOwnB5}/reopen`, {
         method: 'PATCH',
         headers: { Cookie: 'connect.sid=s%3Agarbage-not-a-real-session.invalidsignature' },
       });
-      const status = await sessionStatus(sessionOwnB4);
+      const status = await sessionStatus(sessionOwnB5);
       if (res.status === 401 && status === 'completed') {
-        pass('g', 'A garbage/tampered session cookie is treated as unauthenticated (401, status unchanged)');
+        pass('i', 'A garbage/tampered session cookie is treated as unauthenticated (401, status unchanged)');
       } else {
-        fail('g', 'A garbage cookie must return 401', `httpStatus=${res.status}, dbStatus=${status}`);
+        fail('i', 'A garbage cookie must return 401', `httpStatus=${res.status}, dbStatus=${status}`);
+      }
+    }
+
+    // ── Case j (Task 5): reopen response carries the same enriched fields as
+    // GET/POST/PATCH /:id — owner_username/owner_role/created_by_username/
+    // archived_by_username — so the Current Session card never falls back
+    // after a reopen. This session was created directly via SQL (no
+    // created_by_user_id set), which also exercises the null-creator case
+    // safely, and no password_hash or unexpected username-shaped key ever leaks.
+    {
+      const { cookie } = await login(base, mentorUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/${sessionForFieldCheck}/reopen`, { method: 'PATCH', headers: { Cookie: cookie } });
+      const raw = await res.text();
+      const body = JSON.parse(raw);
+      const noPasswordLeak = !/password/i.test(raw);
+      const usernameKeys = Object.keys(body).filter(k => /username/i.test(k));
+      const onlyAllowlisted = usernameKeys.every(k => ['owner_username', 'created_by_username', 'archived_by_username'].includes(k));
+      const correctFields = body.owner_username === assignedStudentUsername
+        && body.owner_role === 'student'
+        && (body.created_by_username === null || body.created_by_username === undefined);
+      if (res.status === 200 && body.status === 'active' && correctFields && noPasswordLeak && onlyAllowlisted) {
+        pass('j', `Reopen response carries correct owner_username/owner_role (${body.owner_username}/${body.owner_role}), null created_by_username, no leak`);
+      } else {
+        fail('j', 'Reopen response must carry correct enriched fields with no leak',
+          `status=${res.status}, body=${JSON.stringify(body)}, noPasswordLeak=${noPasswordLeak}, onlyAllowlisted=${onlyAllowlisted}`);
       }
     }
 

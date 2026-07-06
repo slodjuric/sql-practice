@@ -16,8 +16,16 @@ async function resolveSessionId(userId, provided) {
     }
   }
   if (!userId) return null;
+  // Archived sessions are excluded from this auto-pick fallback — archiving
+  // is a lifecycle-visibility action, so a hidden session should never be
+  // silently resurrected as "the" session just because none was explicitly
+  // requested. An explicitly-provided archived sessionId (the branch above)
+  // still resolves normally; callers check archived_at themselves and return
+  // a specific "this session is archived" error instead of a generic null.
   const res = await pool.query(
-    'SELECT id FROM learning_sessions WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1',
+    `SELECT id FROM learning_sessions
+     WHERE user_id = $1 AND archived_at IS NULL
+     ORDER BY created_at ASC LIMIT 1`,
     [userId]
   );
   return res.rows[0]?.id ?? null;

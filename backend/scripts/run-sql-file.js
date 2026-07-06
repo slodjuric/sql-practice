@@ -3,7 +3,10 @@
 /**
  * Runs a SQL file against the configured database.
  * Usage: node scripts/run-sql-file.js [path/to/file.sql]
- * Defaults to backend/db/init-practice-db.sql when no argument is given.
+ * Defaults to backend/db/schemas/academic.sql when no argument is given
+ * (backend/db/init-practice-db.sql is an older, superseded version of the
+ * same tables in the `public` schema — no longer the default, kept only
+ * as a historical reference).
  */
 
 const fs   = require('fs');

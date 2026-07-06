@@ -77,11 +77,14 @@ router.post('/:id/check', async (req, res) => {
 
   if (resolvedSessionId) {
     const sessionRow = await pool.query(
-      'SELECT status FROM learning_sessions WHERE id = $1',
+      'SELECT status, archived_at FROM learning_sessions WHERE id = $1',
       [resolvedSessionId]
     );
     if (sessionRow.rows[0]?.status === 'completed') {
       return res.status(403).json({ error: 'This session is completed. Reopen it to continue.' });
+    }
+    if (sessionRow.rows[0]?.archived_at) {
+      return res.status(403).json({ error: 'This session is archived. Restore it from the sidebar to continue.' });
     }
   }
 

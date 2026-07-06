@@ -60,16 +60,21 @@ export const api = {
   // and only ever acts on the caller's own sessions, unless targetUserId is
   // explicitly passed (list/create), which the backend re-authorizes itself.
   sessions: {
-    // targetUserId is optional — only sent when a professor is viewing a
-    // selected student's sessions (see App.jsx). Omitted entirely for
-    // normal self-viewing, so existing calls are unchanged.
-    list: (targetUserId) => {
-      const q = targetUserId ? `?targetUserId=${targetUserId}` : '';
-      return request(`/sessions${q}`);
+    // targetUserId is optional — only sent when a mentor/admin is viewing
+    // another user's sessions (see App.jsx's viewedUser). Omitted entirely
+    // for normal self-viewing, so existing calls are unchanged.
+    // includeArchived is optional — only sent by the Sidebar's "show archived
+    // sessions" toggle; omitted (default) returns only non-archived sessions.
+    list: (targetUserId, includeArchived) => {
+      const params = new URLSearchParams();
+      if (targetUserId) params.set('targetUserId', targetUserId);
+      if (includeArchived) params.set('includeArchived', 'true');
+      const q = params.toString();
+      return request(`/sessions${q ? `?${q}` : ''}`);
     },
-    // targetUserId is optional — only sent when a professor is creating a
-    // session for an assigned student (see App.jsx handleCreateSession).
-    // Omitted entirely for normal self-creation, so existing calls are unchanged.
+    // targetUserId is optional — only sent when a mentor/admin is creating a
+    // session for the viewed user (see App.jsx handleCreateSession). Omitted
+    // entirely for normal self-creation, so existing calls are unchanged.
     create: (name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [], datasetId = null, targetUserId = null) =>
       request('/sessions', { method: 'POST', body: JSON.stringify({ name, description, planType, topics, difficulties, projects, categories, ...(datasetId ? { datasetId } : {}), ...(targetUserId ? { targetUserId } : {}) }) }),
     filters: (sessionId) => request(`/sessions/${sessionId}/filters`),
@@ -78,6 +83,12 @@ export const api = {
     complete: (sessionId) => request(`/sessions/${sessionId}/complete`, { method: 'PATCH' }),
     reopen: (sessionId) => request(`/sessions/${sessionId}/reopen`, { method: 'PATCH' }),
     open: (sessionId) => request(`/sessions/${sessionId}/open`, { method: 'PATCH' }),
+    // Archive is the normal user-facing way to remove a session from view —
+    // it preserves all history and is restorable (see restore below).
+    archive: (sessionId) => request(`/sessions/${sessionId}/archive`, { method: 'PATCH' }),
+    restore: (sessionId) => request(`/sessions/${sessionId}/restore`, { method: 'PATCH' }),
+    // Maintenance-only — permanently destroys the session and its history.
+    // Not called from any normal UI flow; kept for direct/admin use only.
     delete: (sessionId) => request(`/sessions/${sessionId}`, { method: 'DELETE' }),
   },
 
@@ -112,8 +123,8 @@ export const api = {
     }),
 
   // userId is never sent — the backend resolves it from the session cookie,
-  // unless targetUserId is explicitly passed (a professor viewing a
-  // selected student), which the backend re-authorizes itself.
+  // unless targetUserId is explicitly passed (a mentor/admin viewing
+  // another user), which the backend re-authorizes itself.
   progress: {
     summary: (sessionId, targetUserId) => {
       const params = new URLSearchParams();

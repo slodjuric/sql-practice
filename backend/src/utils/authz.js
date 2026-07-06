@@ -48,27 +48,27 @@ function requireRole(...allowedRoles) {
 /**
  * Determines whether actingUser is allowed to reopen a completed session.
  *
- * `session` only needs a `user_id` field (the session's owner).
+ * `session` only needs a `user_id` field (the session's owner). Async
+ * because the mentor case needs canAccessStudent's mentor_assignments
+ * lookup — its one caller (PATCH /api/sessions/:id/reopen) awaits it.
  *
- * Rule for now:
- *   - admin:   can reopen any session.
- *   - mentor:  can reopen any session — INTENTIONALLY BROAD AND TEMPORARY.
- *              The mentor_assignments table now exists (see canAccessStudent
- *              below), so the *correct* rule going forward is
- *              `canAccessStudent(actingUser, session.user_id)` instead of a
- *              blanket `true`. That rule requires a DB lookup, which makes
- *              this function async — and its one caller
- *              (PATCH /api/sessions/:id/reopen) currently calls it
- *              synchronously. Changing that is a route-level change, out of
- *              scope for this step (additive-only). Left unchanged
- *              intentionally; narrowing this is the first thing the route
- *              step touching sessions.js reopen logic should do.
- *   - student: can never reopen a completed session, not even their own.
+ * Rules:
+ *   - no actingUser/session => false
+ *   - admin                 => true (can reopen any session)
+ *   - mentor                => true only if canAccessStudent(actingUser,
+ *                              session.user_id) — their own session, or an
+ *                              assigned student's; never an unassigned
+ *                              student's session
+ *   - student                => false, always — never reopens, not even
+ *                              their own session. Deliberately does NOT
+ *                              delegate to canAccessStudent, since that
+ *                              function's self-access check would otherwise
+ *                              let a student reopen their own session.
  */
-function canReopenSession(actingUser, session) {
+async function canReopenSession(actingUser, session) {
   if (!actingUser || !session) return false;
-  if (actingUser.role === 'admin')  return true;
-  if (actingUser.role === 'mentor') return true; // TEMPORARY — see comment above
+  if (actingUser.role === 'admin') return true;
+  if (actingUser.role === 'mentor') return canAccessStudent(actingUser, session.user_id);
   return false;
 }
 
@@ -98,7 +98,7 @@ function canAccessUser(actingUser, targetUserId) {
  * Can actingUser view/manage studentId's sessions/progress?
  *
  * Requires a DB lookup for mentor role (checks mentor_assignments), so this
- * function is async — unlike canAccessUser/canReopenSession.
+ * function is async — unlike canAccessUser.
  *
  * Rules:
  *   - no actingUser  => false
@@ -125,13 +125,17 @@ async function canAccessStudent(actingUser, studentId) {
 /**
  * Can actingUser create a session owned by targetUserId?
  *
- * For now, identical relationship to canAccessStudent: admin can create for
- * anyone, mentor only for assigned students (or themselves), student only
- * for themselves. Kept as a separate named function (rather than an alias)
- * so creation and viewing permissions can diverge later without renaming
- * every call site.
+ * Deliberately narrower than canAccessStudent for one case: students may
+ * never create a session, not even for themselves — the product rule is
+ * "students select existing sessions only." Kept as a separate named
+ * function (rather than an alias of canAccessStudent) precisely so this
+ * kind of divergence — creation is more restrictive than viewing — doesn't
+ * require touching canAccessStudent, which students still need for reading
+ * their own sessions/progress (GET /api/sessions, GET /api/progress/*).
  */
 async function canCreateSessionForUser(actingUser, targetUserId) {
+  if (!actingUser) return false;
+  if (actingUser.role === 'student') return false;
   return canAccessStudent(actingUser, targetUserId);
 }
 
@@ -144,6 +148,32 @@ async function canViewSession(actingUser, session) {
   return canAccessStudent(actingUser, session.user_id);
 }
 
+/**
+ * Can actingUser archive or restore this session?
+ *
+ * `session` only needs a `user_id` field (the session's owner). Same
+ * authorization shape as canReopenSession, deliberately kept as its own
+ * named function rather than an alias — archive/restore is a distinct
+ * product action from reopen, even though the rule happens to be identical:
+ *
+ *   - no actingUser/session => false
+ *   - admin                 => true (can archive/restore any session)
+ *   - mentor                => true only if canAccessStudent(actingUser,
+ *                              session.user_id) — their own session, or an
+ *                              assigned student's; never an unassigned
+ *                              student's session
+ *   - student                => false, always — never archives/restores,
+ *                              not even their own session. Same blanket rule
+ *                              as edit/delete: managing a session's lifecycle
+ *                              is not something a student does.
+ */
+async function canArchiveSession(actingUser, session) {
+  if (!actingUser || !session) return false;
+  if (actingUser.role === 'admin') return true;
+  if (actingUser.role === 'mentor') return canAccessStudent(actingUser, session.user_id);
+  return false;
+}
+
 module.exports = {
   getActingUser,
   requireRole,
@@ -152,4 +182,5 @@ module.exports = {
   canAccessStudent,
   canCreateSessionForUser,
   canViewSession,
+  canArchiveSession,
 };

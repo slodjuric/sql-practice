@@ -6,6 +6,7 @@ import StatusBadge from './shared/StatusBadge';
 import { PLAN_TOPICS, TOPIC_LABELS } from '../constants/topics';
 import { PLAN_DIFFICULTIES, PLAN_DIFFICULTY_OPTIONS, DIFFICULTY_CLASS } from '../constants/difficulties';
 import { PLAN_PROJECTS, PROJECT_LABELS } from '../constants/projects';
+import { roleLabel } from '../utils/roleLabels';
 
 function ProgressBar({ value, max, color = 'var(--accent)' }) {
   const pct = max === 0 ? 0 : Math.round((value / max) * 100);
@@ -195,23 +196,11 @@ function EditPlanForm({ activeSession, sessionFilters, onSave, onCancel }) {
 }
 
 // ── Session Summary Card ───────────────────────────────────────────────────
-function SessionSummaryCard({ activeUser, selectedStudent, activeSession, summary, sessionFilters, onUpdateSession, isPlanEditOpen, setIsPlanEditOpen }) {
+// ProgressView only ever renders this once a real activeSession exists (see
+// NoSessionState below for the !activeSession case) — no empty-state branch
+// needed here anymore.
+function SessionSummaryCard({ activeUser, viewedUser, activeSession, summary, sessionFilters, onUpdateSession, isPlanEditOpen, setIsPlanEditOpen }) {
   const [open, setOpen] = useState(true);
-
-  if (!activeUser) {
-    return (
-      <div className="session-summary-card session-summary-card--empty">
-        <span className="session-summary-empty-text">No active user selected.</span>
-      </div>
-    );
-  }
-  if (!activeSession) {
-    return (
-      <div className="session-summary-card session-summary-card--empty">
-        <span className="session-summary-empty-text">No active session selected.</span>
-      </div>
-    );
-  }
 
   const solved         = summary?.solved         ?? 0;
   const totalTasks     = summary?.totalTasks     ?? 0;
@@ -262,14 +251,16 @@ function SessionSummaryCard({ activeUser, selectedStudent, activeSession, summar
               <div className="session-summary-title-row">
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <span className="session-summary-title">{activeSession.name}</span>
-                  <button
-                    className="btn-plan-edit"
-                    onClick={e => { e.stopPropagation(); setIsPlanEditOpen(true); }}
-                    disabled={isCompleted}
-                    title={isCompleted ? 'Reopen this session to edit the plan.' : 'Edit plan'}
-                  >
-                    Edit
-                  </button>
+                  {activeUser.role !== 'student' && (
+                    <button
+                      className="btn-plan-edit"
+                      onClick={e => { e.stopPropagation(); setIsPlanEditOpen(true); }}
+                      disabled={isCompleted}
+                      title={isCompleted ? 'Reopen this session to edit the plan.' : 'Edit plan'}
+                    >
+                      Edit
+                    </button>
+                  )}
                 </div>
                 <span className={`session-status-badge session-status-badge--${isCompleted ? 'completed' : 'active'}`}>
                   {isCompleted ? 'completed' : 'active'}
@@ -285,7 +276,21 @@ function SessionSummaryCard({ activeUser, selectedStudent, activeSession, summar
               <div className="session-summary-grid">
                 <div className="session-summary-item">
                   <span className="session-summary-label">User</span>
-                  <span className="session-summary-value">{(selectedStudent || activeUser).username}</span>
+                  <span className="session-summary-value">
+                    {/* Backend now returns authoritative owner_username/owner_role
+                        (Task 4) — fall back to viewedUser/activeUser only if an
+                        older cached session object doesn't have them yet, so
+                        this never crashes mid-rollout. */}
+                    {activeSession.owner_username
+                      ? `${activeSession.owner_username} (${roleLabel(activeSession.owner_role)})`
+                      : (viewedUser || activeUser).username}
+                  </span>
+                </div>
+                <div className="session-summary-item">
+                  <span className="session-summary-label">Created by</span>
+                  <span className="session-summary-value">
+                    {activeSession.created_by_username || '—'}
+                  </span>
                 </div>
                 {activeSession.dataset_name && (
                   <div className="session-summary-item">
@@ -376,13 +381,79 @@ function SessionSummaryCard({ activeUser, selectedStudent, activeSession, summar
   );
 }
 
+// ── No-session empty state ──────────────────────────────────────────────────
+// Shown instead of the full dashboard whenever there is no activeSession at
+// all — previously the backend's "no session" fallback (a synthetic summary
+// covering every academic task, all unsolved) rendered as if a real 221-task
+// plan existed. Wording varies by context; only mentor/admin ever get a
+// create-session action (students can never create their own session).
+function NoSessionState({ activeUser, viewedUser, onRequestCreateSession }) {
+  let title;
+  let description;
+  let buttonLabel = null;
+
+  if (viewedUser) {
+    title = `No sessions for ${viewedUser.username} yet.`;
+    description = "Create a session to assign tasks and start tracking this student's progress.";
+    buttonLabel = `Create session for ${viewedUser.username}`;
+  } else if (activeUser.role === 'student') {
+    title = 'No session has been assigned to you yet.';
+    description = 'Ask your professor or an admin to create one for you.';
+  } else {
+    title = 'No session yet.';
+    description = 'Create a session to start practicing.';
+    buttonLabel = 'Create a session';
+  }
+
+  return (
+    <div>
+      <div className="page-header"><h2>Progress</h2></div>
+      <div className="page-body">
+        <div className="progress-empty-state">
+          <h3 className="progress-empty-state-title">{title}</h3>
+          <p className="progress-empty-state-text">{description}</p>
+          {buttonLabel && (
+            <button className="btn btn-primary" onClick={() => onRequestCreateSession?.()}>
+              {buttonLabel}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Archived-session guard state ────────────────────────────────────────────
+// Defense-in-depth only (see the comment in `load` above) — under normal
+// navigation an archived session can never become activeSession, since the
+// session list excludes archived sessions by default and restoring one
+// deliberately does not auto-select it. If it somehow happens anyway (a
+// stale reference from another tab, for example), this replaces the
+// dashboard with a clear, specific message instead of firing a request the
+// backend would just 403.
+function ArchivedSessionState({ activeSession }) {
+  return (
+    <div>
+      <div className="page-header"><h2>Progress</h2></div>
+      <div className="page-body">
+        <div className="progress-empty-state">
+          <h3 className="progress-empty-state-title">"{activeSession.name}" is archived.</h3>
+          <p className="progress-empty-state-text">
+            Restore it from "Show archived sessions" in the sidebar, or select a different session.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Progress View ──────────────────────────────────────────────────────────
-export default function ProgressView({ activeUser, selectedStudent, targetUserId, activeSession, sessionFilters, onOpenTask, onOpenCategory, onUpdateSession, onNavigate, progressVersion, autoOpenPlanEditor, onAutoOpenPlanEditorConsumed }) {
-  // Review mode: a professor viewing a selected student's progress. Practice
+export default function ProgressView({ activeUser, viewedUser, targetUserId, activeSession, sessionFilters, onOpenTask, onOpenCategory, onUpdateSession, onNavigate, progressVersion, autoOpenPlanEditor, onAutoOpenPlanEditorConsumed, onRequestCreateSession }) {
+  // Review mode: a mentor/admin viewing another user's progress. Practice
   // is explicitly first-person-only (product decision, Step J) — every task/
   // attempt/category entry point into Practice is guarded below rather than
   // wiring targetUserId into Practice itself.
-  const reviewMode = !!selectedStudent;
+  const reviewMode = !!viewedUser;
 
   const [summary,        setSummary]        = useState(null);
   const [loading,        setLoading]        = useState(true);
@@ -414,9 +485,24 @@ export default function ProgressView({ activeUser, selectedStudent, targetUserId
     setExpandedTopics(prev => ({ ...prev, [topicId]: !prev[topicId] }));
 
   const load = useCallback(() => {
+    // No session at all — skip the fetch entirely rather than relying on the
+    // backend's "no session" fallback (a synthetic summary covering every
+    // academic task). See NoSessionState below for what renders instead.
+    //
+    // An archived session should never reach here under normal navigation —
+    // the session list (and therefore activeSession) excludes archived
+    // sessions by default — but this guards defensively against a stale
+    // reference (e.g. archived in another tab/session while this one still
+    // holds it as active) instead of firing a request the backend will 403 anyway.
+    if (!activeSession || activeSession.archived_at) {
+      setSummary(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
-    api.progress.summary(activeSession?.id, targetUserId)
+    api.progress.summary(activeSession.id, targetUserId)
       .then(setSummary)
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
@@ -444,8 +530,12 @@ export default function ProgressView({ activeUser, selectedStudent, targetUserId
     load();
   }
 
+  // Opening a task/attempt from review mode is safe to allow: Practice/
+  // TaskView never receive viewedUser/targetUserId, so every run/check this
+  // leads to is still hard-scoped to the acting (professor/admin) user's own
+  // account and session — never the reviewed student's. Only the reviewed
+  // student's task DATA is being inspected here, not acted on as them.
   function handleOpenTask(taskId, topicId) {
-    if (reviewMode) return; // Practice is first-person-only — see reviewMode above
     if (!taskId || !topicId) {
       console.warn('openTaskFromProgress: missing taskId or topicId');
       return;
@@ -454,9 +544,16 @@ export default function ProgressView({ activeUser, selectedStudent, targetUserId
   }
 
   function handleOpenAttempt(group, attempt) {
-    if (reviewMode) return; // Practice is first-person-only — see reviewMode above
     if (!group.taskId || !group.topicId) return;
     onOpenTask?.({ taskId: group.taskId, topicId: group.topicId, attemptSql: attempt.submittedSql || null });
+  }
+
+  if (!activeSession) {
+    return <NoSessionState activeUser={activeUser} viewedUser={viewedUser} onRequestCreateSession={onRequestCreateSession} />;
+  }
+
+  if (activeSession.archived_at) {
+    return <ArchivedSessionState activeSession={activeSession} />;
   }
 
   if (loading) return <div className="loading">Loading progress</div>;
@@ -507,23 +604,26 @@ export default function ProgressView({ activeUser, selectedStudent, targetUserId
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingBottom: 16 }}>
           <div>
             <h2 style={{ marginBottom: 4 }}>Progress</h2>
-            <p style={{ paddingBottom: 0 }}>Track your SQL learning journey.</p>
+            <p style={{ paddingBottom: 0 }}>
+              {/* The global viewing banner (App.jsx) already names the viewed
+                  user/role and confirms Practice stays first-person — this
+                  subtitle just needs to stop saying "your" journey when it
+                  isn't. No separate review badge needed here anymore. */}
+              {reviewMode
+                ? 'Review progress, sessions, and recent attempts for this user.'
+                : 'Track your SQL learning journey.'}
+            </p>
           </div>
           <button className="btn btn-secondary" onClick={load} style={{ fontSize: 12 }}>
             ↻ Refresh
           </button>
         </div>
-        {reviewMode && (
-          <div className="progress-review-badge">
-            Review mode — viewing {selectedStudent.username}'s progress. Practice actions remain your own.
-          </div>
-        )}
       </div>
 
       <div className="page-body">
         <SessionSummaryCard
           activeUser={activeUser}
-          selectedStudent={selectedStudent}
+          viewedUser={viewedUser}
           activeSession={activeSession}
           summary={summary}
           sessionFilters={sessionFilters}
@@ -569,7 +669,7 @@ export default function ProgressView({ activeUser, selectedStudent, targetUserId
             {(byGroup ?? []).map(g => {
               const label    = g.groupLabel ?? TOPIC_LABELS[g.groupId] ?? g.groupId;
               const expanded = !!expandedTopics[g.groupId];
-              const canNav   = !!(g.canNavigate && onOpenCategory && !reviewMode);
+              const canNav   = !!(g.canNavigate && onOpenCategory);
               return (
                 <div key={g.groupId}>
                   <div
@@ -598,9 +698,9 @@ export default function ProgressView({ activeUser, selectedStudent, targetUserId
                       {(g.tasks || []).map(task => (
                         <div
                           key={task.id}
-                          className={`progress-topic-task-row${reviewMode ? '' : ' progress-list-row--clickable'}`}
+                          className="progress-topic-task-row progress-list-row--clickable"
                           onClick={() => handleOpenTask(task.id, task.topicId)}
-                          title={reviewMode ? 'Practice unavailable in review mode' : undefined}
+                          title={reviewMode ? `Open in Practice — actions remain your own, not ${viewedUser.username}'s` : 'Open task'}
                         >
                           <div className="progress-list-info">
                             <div className="progress-list-title">{task.title}</div>
@@ -631,7 +731,7 @@ export default function ProgressView({ activeUser, selectedStudent, targetUserId
             <h3 className="progress-empty-state-title">No activity yet — let's get started!</h3>
             <p className="progress-empty-state-text">
               {reviewMode
-                ? "This student hasn't checked any answers yet."
+                ? `${viewedUser.username} hasn't checked any answers yet.`
                 : 'Pick a task from Practice to begin tracking your progress.'}
             </p>
             {!reviewMode && (
@@ -682,13 +782,13 @@ export default function ProgressView({ activeUser, selectedStudent, targetUserId
                           {group.attempts.map((attempt, idx) => {
                             const status = attempt.isCorrect === true  ? 'correct'
                                          : attempt.isCorrect === false ? 'wrong' : 'run';
-                            const canOpen = !!(group.taskId && group.topicId && attempt.submittedSql) && !reviewMode;
+                            const canOpen = !!(group.taskId && group.topicId && attempt.submittedSql);
                             return (
                               <div
                                 key={idx}
                                 className={`recent-attempt-detail-row${canOpen ? ' recent-attempt-detail-row--clickable' : ''}`}
                                 onClick={canOpen ? (e) => { e.stopPropagation(); handleOpenAttempt(group, attempt); } : undefined}
-                                title={reviewMode ? 'Practice unavailable in review mode' : (canOpen ? 'Open this attempt' : undefined)}
+                                title={canOpen ? (reviewMode ? `Open in Practice — actions remain your own, not ${viewedUser.username}'s` : 'Open this attempt') : undefined}
                               >
                                 <span className={`progress-badge ${
                                   status === 'correct' ? 'progress-badge--correct'   :
@@ -726,13 +826,13 @@ export default function ProgressView({ activeUser, selectedStudent, targetUserId
             ) : (
               <div className="progress-list progress-list--scrollable">
                 {inProgressTasks.map(t => {
-                  const clickable = !!(t.taskId && t.topicId) && !reviewMode;
+                  const clickable = !!(t.taskId && t.topicId);
                   return (
                     <div
                       key={t.taskId}
                       className={`progress-list-row${clickable ? ' progress-list-row--clickable' : ''}`}
                       onClick={() => clickable && handleOpenTask(t.taskId, t.topicId)}
-                      title={reviewMode ? 'Practice unavailable in review mode' : (clickable ? 'Open task' : undefined)}
+                      title={clickable ? (reviewMode ? `Open in Practice — actions remain your own, not ${viewedUser.username}'s` : 'Open task') : undefined}
                     >
                       <div className="progress-list-info">
                         <div className="progress-list-title">{t.taskTitle}</div>

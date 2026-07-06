@@ -101,10 +101,20 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
+/* Stacked layout: the label is its own row (sidebar-session-header), and
+   the dropdown + plus/delete buttons form a second row
+   (sidebar-session-controls) below it — avoids cramming everything into one
+   row that gets crowded on a narrower sidebar. Same two elements as before,
+   just laid out vertically instead of side by side. */
 .sidebar-session-row {
   display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sidebar-session-header {
+  display: flex;
   align-items: center;
-  gap: 8px;
 }
 
 .sidebar-session-label {
@@ -114,24 +124,33 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.8px;
   white-space: nowrap;
-  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sidebar-session-label--student {
   color: var(--accent);
-  flex-shrink: 1;
-  min-width: 0;
-  max-width: 55%;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  width: 100%;
 }
 
 .sidebar-session-controls {
   display: flex;
   align-items: center;
   gap: 4px;
-  flex: 1;
-  min-width: 0;
+  width: 100%;
+}
+
+.sidebar-mentor-overview-note {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sidebar-mentor-overview-text {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  margin: 0;
 }
 
 
@@ -159,7 +178,7 @@ body {
   background: rgba(88, 166, 255, 0.08);
 }
 
-.sidebar-delete-session-btn {
+.sidebar-archive-session-btn {
   flex-shrink: 0;
   width: 22px;
   height: 22px;
@@ -177,14 +196,95 @@ body {
   padding: 0;
 }
 
-.sidebar-delete-session-btn:hover:not(:disabled) {
-  border-color: #f85149;
-  color: #f85149;
-  background: rgba(248, 81, 73, 0.08);
+.sidebar-archive-session-btn:hover:not(:disabled) {
+  border-color: var(--yellow);
+  color: var(--yellow);
+  background: rgba(210, 153, 34, 0.08);
 }
 
-.sidebar-delete-session-btn:disabled {
+.sidebar-archive-session-btn:disabled {
   opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* ===== Archived sessions (peek/restore) ===== */
+.sidebar-archived-section {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.sidebar-archived-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.12s;
+}
+
+.sidebar-archived-toggle:hover {
+  color: var(--text-primary);
+}
+
+.sidebar-archived-list {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sidebar-archived-loading,
+.sidebar-archived-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 2px 0;
+}
+
+.sidebar-archived-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: var(--radius);
+  background: rgba(139, 148, 158, 0.08);
+  border: 1px solid var(--border);
+}
+
+.sidebar-archived-item-name {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-style: italic;
+}
+
+.sidebar-archived-restore-btn {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: var(--radius);
+  font-size: 10px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid rgba(63, 185, 80, 0.4);
+  background: transparent;
+  color: var(--green);
+  transition: all 0.12s;
+}
+
+.sidebar-archived-restore-btn:hover:not(:disabled) {
+  background: rgba(63, 185, 80, 0.08);
+}
+
+.sidebar-archived-restore-btn:disabled {
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
@@ -198,6 +298,13 @@ body {
   cursor: pointer;
   border: 1px solid transparent;
   transition: all 0.12s;
+}
+
+.sidebar-complete-hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
 }
 
 .sidebar-session-complete {
@@ -370,6 +477,18 @@ body {
   background: rgba(210, 153, 34, 0.10);
   border: 1px solid rgba(210, 153, 34, 0.35);
   color: var(--yellow);
+}
+
+/* ===== Session archived banner (in TaskView) ===== */
+.session-archived-banner {
+  padding: 10px 16px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 12px;
+  background: rgba(139, 148, 158, 0.10);
+  border: 1px solid rgba(139, 148, 158, 0.35);
+  color: var(--text-muted);
 }
 
 .task-inactive-banner {
@@ -604,6 +723,30 @@ body {
 
 .viewing-banner-text strong { color: var(--accent); }
 
+.viewing-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.viewing-banner-own-progress {
+  flex: none;
+  padding: 6px 12px;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.viewing-banner-own-progress:hover {
+  background: rgba(88, 166, 255, 0.12);
+}
+
 .viewing-banner-clear {
   flex: none;
   padding: 6px 12px;
@@ -643,6 +786,17 @@ body {
 
 .progress-review-badge {
   margin-bottom: 16px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  background: rgba(88, 166, 255, 0.1);
+  border: 1px solid rgba(88, 166, 255, 0.3);
+}
+
+.practice-review-notice {
+  margin: 16px 28px 0;
   padding: 8px 12px;
   border-radius: var(--radius);
   font-size: 12px;

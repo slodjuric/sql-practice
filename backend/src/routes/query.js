@@ -29,15 +29,19 @@ router.post('/', async (req, res) => {
   const resolvedUserId    = actingUser?.id ?? null;
   const resolvedSessionId = actingUser ? await resolveSessionId(actingUser.id, sessionId) : null;
 
-  // Completed-session guard applies only to task runs (Run Query button on a task),
-  // not to the free-form playground where no attempts are recorded.
+  // Completed/archived-session guards apply only to task runs (Run Query
+  // button on a task), not to the free-form playground where no attempts are
+  // recorded.
   if (taskId && resolvedSessionId) {
     const sessionRow = await pool.query(
-      'SELECT status FROM learning_sessions WHERE id = $1',
+      'SELECT status, archived_at FROM learning_sessions WHERE id = $1',
       [resolvedSessionId]
     );
     if (sessionRow.rows[0]?.status === 'completed') {
       return res.status(403).json({ error: 'This session is completed. Reopen it to continue.' });
+    }
+    if (sessionRow.rows[0]?.archived_at) {
+      return res.status(403).json({ error: 'This session is archived. Restore it from the sidebar to continue.' });
     }
   }
 

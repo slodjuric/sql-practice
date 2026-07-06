@@ -4,7 +4,7 @@ const pool = require('../db');
 const { tasks } = require('../data/taskRegistry');
 const { matchesSessionFilters, getSessionFilters } = require('../utils/taskFilters');
 const { getDatasetByKey, getDatasetBySessionId } = require('../utils/datasetResolver');
-const { getActingUser, canReopenSession, canCreateSessionForUser, canAccessStudent } = require('../utils/authz');
+const { getActingUser, canReopenSession, canCreateSessionForUser, canAccessStudent, canArchiveSession } = require('../utils/authz');
 
 async function insertSessionFilters(client, sessionId, { topics = [], difficulties = [], projects = [], categories = [] } = {}) {
   const rows = [
@@ -23,6 +23,27 @@ async function insertSessionFilters(client, sessionId, { topics = [], difficulti
   );
 }
 
+// Shared by every route that returns a single enriched session object
+// (POST, PATCH /:id, PATCH /:id/complete, PATCH /:id/reopen, PATCH /:id/archive,
+// PATCH /:id/restore) — attaches the current dataset fields plus read-only
+// ownership metadata: owner_username/owner_role (from user_id),
+// created_by_username (from created_by_user_id, null if never set or the
+// creator was since deleted), and archived_by_username (from
+// archived_by_user_id, same null-if-deleted behavior). Only these fields are
+// exposed; no password_hash or other user columns. Merge the single result
+// row into the session object, e.g. `{ ...session, ...enrichRow.rows[0] }`.
+const SESSION_ENRICH_QUERY = `
+  SELECT d.key AS dataset_key, d.name AS dataset_name, d.schema_name, d.type AS dataset_type,
+         o.username AS owner_username, o.role AS owner_role, c.username AS created_by_username,
+         a.username AS archived_by_username
+  FROM learning_sessions ls
+  LEFT JOIN datasets d ON d.id = ls.dataset_id
+  LEFT JOIN users o ON o.id = ls.user_id
+  LEFT JOIN users c ON c.id = ls.created_by_user_id
+  LEFT JOIN users a ON a.id = ls.archived_by_user_id
+  WHERE ls.id = $1
+`;
+
 // Resolves the dataset_id to use for a new session.
 // Accepts an explicit datasetId (integer), falls back to the academic dataset.
 async function resolveDatasetId(providedDatasetId) {
@@ -38,11 +59,24 @@ async function resolveDatasetId(providedDatasetId) {
 }
 
 // GET /api/sessions
-// By default, returns the authenticated user's own sessions — unchanged
-// from before. Optionally accepts ?targetUserId=<id> so an admin/mentor can
-// read another authorized user's sessions (e.g. a mentor viewing an
-// assigned student's sessions). Authorization is always re-checked
-// server-side via canAccessStudent, never trusted from the query string.
+// By default, returns the authenticated user's own, NON-ARCHIVED sessions —
+// archiving is a lifecycle-visibility action (see PATCH /:id/archive below),
+// so an archived session is hidden from the normal list unless the caller
+// explicitly opts in via ?includeArchived=true (used by the "show archived
+// sessions" toggle in the UI). Optionally accepts ?targetUserId=<id> so an
+// admin/mentor can read another authorized user's sessions (e.g. a mentor
+// viewing an assigned student's sessions). Authorization is always
+// re-checked server-side via canAccessStudent, never trusted from the query
+// string.
+//
+// Each session row also carries read-only ownership metadata so the UI can
+// show whose session it is without inferring it from local viewedUser state:
+// owner_username/owner_role (from user_id), created_by_username (from
+// created_by_user_id, null if never set or the creator was since deleted —
+// see the ON DELETE SET NULL migration in initDb.js), and
+// archived_by_username (same null-if-deleted behavior, from
+// archived_by_user_id). Only these four fields are exposed; no password_hash
+// or other user columns.
 router.get('/', async (req, res) => {
   const actingUser = await getActingUser(req);
   if (!actingUser) {
@@ -50,7 +84,7 @@ router.get('/', async (req, res) => {
   }
 
   let ownerId = actingUser.id;
-  const { targetUserId } = req.query;
+  const { targetUserId, includeArchived } = req.query;
   if (targetUserId !== undefined && targetUserId !== null && targetUserId !== '') {
     const parsedTargetId = parseInt(targetUserId, 10);
     if (isNaN(parsedTargetId)) {
@@ -65,16 +99,25 @@ router.get('/', async (req, res) => {
     ownerId = parsedTargetId;
   }
 
+  const showArchived = includeArchived === 'true' || includeArchived === '1';
+
   try {
     const result = await pool.query(
       `SELECT ls.*,
               d.key  AS dataset_key,
               d.name AS dataset_name,
               d.schema_name,
-              d.type AS dataset_type
+              d.type AS dataset_type,
+              o.username AS owner_username,
+              o.role     AS owner_role,
+              c.username AS created_by_username,
+              a.username AS archived_by_username
        FROM learning_sessions ls
        LEFT JOIN datasets d ON d.id = ls.dataset_id
-       WHERE ls.user_id = $1
+       LEFT JOIN users o ON o.id = ls.user_id
+       LEFT JOIN users c ON c.id = ls.created_by_user_id
+       LEFT JOIN users a ON a.id = ls.archived_by_user_id
+       WHERE ls.user_id = $1 ${showArchived ? '' : 'AND ls.archived_at IS NULL'}
        ORDER BY ls.created_at ASC`,
       [ownerId]
     );
@@ -86,12 +129,13 @@ router.get('/', async (req, res) => {
 
 // POST /api/sessions
 // By default, creates a session owned by (and created by) the authenticated
-// user — unchanged from before. Optionally accepts `targetUserId` in the
-// body so an admin/mentor can create a session owned by another user (e.g.
-// a mentor setting up a plan for an assigned student). Named to match the
-// `targetUserId` parameter of canCreateSessionForUser (utils/authz.js) —
-// authorization is always re-checked server-side, never trusted from the
-// frontend, even though nothing in the frontend sends this field yet.
+// user. Optionally accepts `targetUserId` in the body so an admin/mentor can
+// create a session owned by another user (e.g. a mentor setting up a plan
+// for an assigned student). Named to match the `targetUserId` parameter of
+// canCreateSessionForUser (utils/authz.js) — authorization is always
+// re-checked server-side via that function, for self-creation too, never
+// trusted from the frontend. Students can never create a session, not even
+// for themselves — canCreateSessionForUser rejects the student role outright.
 router.post('/', async (req, res) => {
   const actingUser = await getActingUser(req);
   if (!actingUser) {
@@ -103,9 +147,8 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'Session name is required.' });
   }
 
-  // ownerId defaults to the acting user — the exact pre-existing behavior —
-  // and is only ever changed after an explicit targetUserId passes both an
-  // existence check and canCreateSessionForUser.
+  // ownerId defaults to the acting user, and is only ever changed after an
+  // explicit targetUserId passes an existence check.
   let ownerId = actingUser.id;
   const targetUserIdProvided = targetUserId !== undefined && targetUserId !== null && targetUserId !== '';
 
@@ -120,12 +163,14 @@ router.post('/', async (req, res) => {
       return res.status(404).json({ error: 'Target user not found.' });
     }
 
-    const allowed = await canCreateSessionForUser(actingUser, parsedTargetId);
-    if (!allowed) {
-      return res.status(403).json({ error: 'You do not have permission to create a session for this user.' });
-    }
-
     ownerId = parsedTargetId;
+  }
+
+  // Always re-checked, even for self-creation with no targetUserId — this is
+  // what actually blocks a student from creating their own session.
+  const allowed = await canCreateSessionForUser(actingUser, ownerId);
+  if (!allowed) {
+    return res.status(403).json({ error: 'You do not have permission to create a session for this user.' });
   }
 
   const resolvedDatasetId = await resolveDatasetId(datasetId);
@@ -142,12 +187,11 @@ router.post('/', async (req, res) => {
     );
     const session = result.rows[0];
 
-    // Attach dataset fields to the returned session object
-    const datasetRow = await client.query(
-      'SELECT key AS dataset_key, name AS dataset_name, schema_name, type AS dataset_type FROM datasets WHERE id = $1',
-      [resolvedDatasetId]
-    );
-    const sessionWithDataset = { ...session, ...datasetRow.rows[0] };
+    // Attach dataset fields + read-only ownership metadata (see
+    // SESSION_ENRICH_QUERY) — otherwise a freshly created session would show
+    // this info only after the next full list reload.
+    const enrichRow = await client.query(SESSION_ENRICH_QUERY, [session.id]);
+    const sessionWithDataset = { ...session, ...enrichRow.rows[0] };
 
     const topicArr    = Array.isArray(topics)       ? topics       : [];
     const diffArr     = Array.isArray(difficulties)  ? difficulties : [];
@@ -181,6 +225,10 @@ router.post('/', async (req, res) => {
 // PATCH /api/sessions/:id — update name, description and replace filters
 // dataset_id is intentionally NOT editable after session creation.
 // userId always comes from the authenticated session — never from the client.
+// Authorization is based on the session's own user_id (fetched here), not on
+// any targetUserId the client might send — a mentor editing an assigned
+// student's session relies on the session row itself, exactly like
+// canViewSession/GET /api/sessions.
 router.patch('/:id', async (req, res) => {
   const sid = parseInt(req.params.id, 10);
 
@@ -199,12 +247,37 @@ router.patch('/:id', async (req, res) => {
     await client.query('BEGIN');
 
     const check = await client.query(
-      'SELECT id FROM learning_sessions WHERE id = $1 AND user_id = $2',
-      [sid, actingUser.id]
+      'SELECT id, user_id, archived_at FROM learning_sessions WHERE id = $1',
+      [sid]
     );
     if (check.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Session not found.' });
+    }
+    const existingSession = check.rows[0];
+
+    // Students can view/select sessions but never manage them — renaming or
+    // editing the plan is a management action, not even for their own session.
+    if (actingUser.role === 'student') {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'You do not have permission to edit sessions.' });
+    }
+
+    // Admin can edit any session; mentor can edit their own session or an
+    // assigned student's session, never an unassigned student's — same rule
+    // canAccessStudent already encodes for GET /api/sessions.
+    const allowed = await canAccessStudent(actingUser, existingSession.user_id);
+    if (!allowed) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'You do not have permission to edit this session.' });
+    }
+
+    // Archived sessions are hidden/inert until restored — editing one before
+    // restoring it would silently bring a "forgotten" plan back into active
+    // use without the explicit restore step the archive flow is meant to require.
+    if (existingSession.archived_at) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'This session is archived. Restore it before editing.' });
     }
 
     const result = await client.query(
@@ -213,15 +286,12 @@ router.patch('/:id', async (req, res) => {
     );
     const session = result.rows[0];
 
-    // Attach current dataset fields
-    const datasetRow = await client.query(
-      `SELECT d.key AS dataset_key, d.name AS dataset_name, d.schema_name, d.type AS dataset_type
-       FROM datasets d
-       JOIN learning_sessions ls ON ls.dataset_id = d.id
-       WHERE ls.id = $1`,
-      [sid]
-    );
-    const sessionWithDataset = { ...session, ...datasetRow.rows[0] };
+    // Attach dataset fields + read-only ownership metadata (see
+    // SESSION_ENRICH_QUERY) — edit doesn't change ownership, but keeps the
+    // response shape consistent so the Current Session card doesn't lose
+    // owner/creator info right after a save.
+    const enrichRow = await client.query(SESSION_ENRICH_QUERY, [sid]);
+    const sessionWithDataset = { ...session, ...enrichRow.rows[0] };
 
     await client.query('DELETE FROM learning_session_filters WHERE session_id = $1', [sid]);
 
@@ -249,9 +319,15 @@ router.patch('/:id', async (req, res) => {
 });
 
 // GET /api/sessions/:id/filters
-// Requires login; a nonexistent session and another user's session both
-// return 404 (no distinction), so a session id can't be used to probe
-// whether it exists but belongs to someone else.
+// Requires login. Authorization mirrors PATCH/DELETE /:id: fetch the session
+// by id first (404 if it doesn't exist at all), then authorize via
+// canAccessStudent(actingUser, session.user_id) — self always allowed, admin
+// always allowed, mentor allowed only for their own or an assigned student's
+// session (403 otherwise), student allowed only for their own. This used to
+// be scoped to `WHERE user_id = actingUser.id`, which made a mentor/admin
+// reviewing another (even assigned) user's session always 404 — silently
+// resetting the Edit Plan form to empty filters and risking overwriting the
+// real plan on save.
 router.get('/:id/filters', async (req, res) => {
   const sid = parseInt(req.params.id, 10);
 
@@ -262,11 +338,17 @@ router.get('/:id/filters', async (req, res) => {
 
   try {
     const sessionRes = await pool.query(
-      'SELECT plan_type FROM learning_sessions WHERE id = $1 AND user_id = $2',
-      [sid, actingUser.id]
+      'SELECT plan_type, user_id FROM learning_sessions WHERE id = $1',
+      [sid]
     );
     if (sessionRes.rows.length === 0) {
       return res.status(404).json({ error: 'Session not found.' });
+    }
+    const existingSession = sessionRes.rows[0];
+
+    const allowed = await canAccessStudent(actingUser, existingSession.user_id);
+    if (!allowed) {
+      return res.status(403).json({ error: 'You do not have permission to view this session\'s filters.' });
     }
 
     const filtersRes = await pool.query(
@@ -298,11 +380,20 @@ router.patch('/:id/complete', async (req, res) => {
   }
 
   try {
+    // Unlike edit/create/delete/reopen, completing a session is not a
+    // management action reserved for admin/mentor — a student legitimately
+    // completes their own session once they've satisfied the conditions
+    // below. Ownership-only, same as before: never another user's session.
     const sessionCheck = await pool.query(
-      'SELECT id FROM learning_sessions WHERE id = $1 AND user_id = $2',
+      'SELECT id, archived_at FROM learning_sessions WHERE id = $1 AND user_id = $2',
       [sid, actingUser.id]
     );
     if (sessionCheck.rows.length === 0) return res.status(404).json({ error: 'Session not found.' });
+
+    // Archived sessions are hidden/inert until restored.
+    if (sessionCheck.rows[0].archived_at) {
+      return res.status(403).json({ error: 'This session is archived. Restore it before completing it.' });
+    }
 
     // Verify every in-scope task has been run at least once
     const [filters, progressResult, dataset] = await Promise.all([
@@ -332,7 +423,9 @@ router.patch('/:id/complete', async (req, res) => {
       [sid, actingUser.id]
     );
     if (!result.rows[0]) return res.status(500).json({ error: 'Session update failed.' });
-    res.json(result.rows[0]);
+
+    const enrichRow = await pool.query(SESSION_ENRICH_QUERY, [sid]);
+    res.json({ ...result.rows[0], ...enrichRow.rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -352,7 +445,7 @@ router.patch('/:id/reopen', async (req, res) => {
 
   try {
     const sessionRow = await pool.query(
-      'SELECT id, user_id FROM learning_sessions WHERE id = $1',
+      'SELECT id, user_id, archived_at FROM learning_sessions WHERE id = $1',
       [sid]
     );
     if (sessionRow.rows.length === 0) {
@@ -368,8 +461,15 @@ router.patch('/:id/reopen', async (req, res) => {
       return res.status(404).json({ error: 'Session not found.' });
     }
 
-    if (!canReopenSession(actingUser, session)) {
+    if (!(await canReopenSession(actingUser, session))) {
       return res.status(403).json({ error: 'You do not have permission to reopen this session.' });
+    }
+
+    // Reopen is specifically for completed → active; restoring a session
+    // from archived is a distinct action (PATCH /:id/restore) with its own
+    // authorization check, so archived sessions are routed there instead.
+    if (session.archived_at) {
+      return res.status(403).json({ error: 'This session is archived. Restore it instead of reopening.' });
     }
 
     const result = await pool.query(
@@ -379,7 +479,9 @@ router.patch('/:id/reopen', async (req, res) => {
        RETURNING *`,
       [sid]
     );
-    res.json(result.rows[0]);
+
+    const enrichRow = await pool.query(SESSION_ENRICH_QUERY, [sid]);
+    res.json({ ...result.rows[0], ...enrichRow.rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -387,6 +489,15 @@ router.patch('/:id/reopen', async (req, res) => {
 
 // PATCH /api/sessions/:id/open
 // userId always comes from the authenticated session — never from the client.
+// Deliberately self-only (NOT canAccessStudent, unlike PATCH/DELETE /:id) —
+// last_opened_at is the signal the session's OWNER relies on to have their
+// own next-login session auto-picked (see loadSessionsForContext in
+// App.jsx). A mentor/admin browsing a reviewed user's sessions must never
+// overwrite that signal on the owner's behalf; the frontend already never
+// calls this route in a viewedUser context for exactly this reason — this
+// explicit fetch-then-check makes that the actual enforced backend rule
+// (previously a single combined WHERE clause with the same effect, but not
+// documented as an intentional decision alongside the other routes' authz).
 router.patch('/:id/open', async (req, res) => {
   const sid = parseInt(req.params.id, 10);
 
@@ -396,19 +507,149 @@ router.patch('/:id/open', async (req, res) => {
   }
 
   try {
+    const sessionRes = await pool.query('SELECT id, user_id, archived_at FROM learning_sessions WHERE id = $1', [sid]);
+    if (sessionRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Session not found.' });
+    }
+
+    if (sessionRes.rows[0].user_id !== actingUser.id) {
+      return res.status(404).json({ error: 'Session not found.' });
+    }
+
+    // Archived sessions never become "the resumed active session" — the
+    // frontend's own session list already excludes them by default, but this
+    // is the actual enforced backend rule, same defense-in-depth pattern as
+    // the archived guards on edit/complete/reopen above.
+    if (sessionRes.rows[0].archived_at) {
+      return res.status(403).json({ error: 'This session is archived. Restore it before opening it.' });
+    }
+
     const result = await pool.query(
-      'UPDATE learning_sessions SET last_opened_at = NOW() WHERE id = $1 AND user_id = $2 RETURNING *',
-      [sid, actingUser.id]
+      'UPDATE learning_sessions SET last_opened_at = NOW() WHERE id = $1 RETURNING *',
+      [sid]
     );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Session not found.' });
     res.json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+// PATCH /api/sessions/:id/archive
+// Archive is the NORMAL user-facing way to remove a session from view —
+// unlike DELETE below, it never touches task_attempts, user_task_progress,
+// or learning_session_filters. It only hides the session from the default
+// GET /api/sessions list (see the `includeArchived` handling above) and
+// blocks further lifecycle actions (edit/complete/reopen/open) until it is
+// restored via PATCH /:id/restore. Authorization mirrors DELETE/PATCH /:id:
+// a blanket role gate for students (never, not even their own session), then
+// canArchiveSession (admin any session; mentor own or assigned student's).
+router.patch('/:id/archive', async (req, res) => {
+  const sid = parseInt(req.params.id, 10);
+
+  const actingUser = await getActingUser(req);
+  if (!actingUser) {
+    return res.status(401).json({ error: 'Not authenticated.' });
+  }
+
+  if (actingUser.role === 'student') {
+    return res.status(403).json({ error: 'You do not have permission to archive sessions.' });
+  }
+
+  try {
+    const sessionRow = await pool.query(
+      'SELECT id, user_id FROM learning_sessions WHERE id = $1',
+      [sid]
+    );
+    if (sessionRow.rows.length === 0) {
+      return res.status(404).json({ error: 'Session not found.' });
+    }
+    const session = sessionRow.rows[0];
+
+    const allowed = await canArchiveSession(actingUser, session);
+    if (!allowed) {
+      return res.status(403).json({ error: 'You do not have permission to archive this session.' });
+    }
+
+    const result = await pool.query(
+      `UPDATE learning_sessions
+       SET archived_at = NOW(), archived_by_user_id = $1
+       WHERE id = $2
+       RETURNING *`,
+      [actingUser.id, sid]
+    );
+
+    const enrichRow = await pool.query(SESSION_ENRICH_QUERY, [sid]);
+    res.json({ ...result.rows[0], ...enrichRow.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/sessions/:id/restore
+// Reverses PATCH /:id/archive — clears archived_at/archived_by_user_id so
+// the session reappears in the default GET /api/sessions list and its
+// lifecycle actions (edit/complete/reopen/open) work normally again. Does
+// NOT change status (active/completed) or last_opened_at — restoring a
+// session never makes it "the resumed active session" on its own; the owner
+// (or a mentor/admin) still has to select it explicitly afterwards. Same
+// authorization as archive: student never; admin any; mentor own or
+// assigned student's session.
+router.patch('/:id/restore', async (req, res) => {
+  const sid = parseInt(req.params.id, 10);
+
+  const actingUser = await getActingUser(req);
+  if (!actingUser) {
+    return res.status(401).json({ error: 'Not authenticated.' });
+  }
+
+  if (actingUser.role === 'student') {
+    return res.status(403).json({ error: 'You do not have permission to restore sessions.' });
+  }
+
+  try {
+    const sessionRow = await pool.query(
+      'SELECT id, user_id FROM learning_sessions WHERE id = $1',
+      [sid]
+    );
+    if (sessionRow.rows.length === 0) {
+      return res.status(404).json({ error: 'Session not found.' });
+    }
+    const session = sessionRow.rows[0];
+
+    const allowed = await canArchiveSession(actingUser, session);
+    if (!allowed) {
+      return res.status(403).json({ error: 'You do not have permission to restore this session.' });
+    }
+
+    const result = await pool.query(
+      `UPDATE learning_sessions
+       SET archived_at = NULL, archived_by_user_id = NULL
+       WHERE id = $1
+       RETURNING *`,
+      [sid]
+    );
+
+    const enrichRow = await pool.query(SESSION_ENRICH_QUERY, [sid]);
+    res.json({ ...result.rows[0], ...enrichRow.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DELETE /api/sessions/:id
-// userId always comes from the authenticated session — never from the client.
+// MAINTENANCE-ONLY — not the normal user-facing flow. Archive (above) is now
+// the standard way a session is removed from view, and it preserves all
+// history; this route still permanently destroys task_attempts,
+// user_task_progress, learning_session_filters, and the session row itself,
+// with no way to undo it. It is intentionally not called from anywhere in
+// the frontend (no button reaches it) — it remains here only for direct
+// API/admin/database-maintenance use (e.g. purging a genuinely unwanted test
+// or duplicate session). Authorization is unchanged from before: userId
+// always comes from the authenticated session — never from the client.
+// Based on the session's own user_id (fetched here), not on any targetUserId
+// the client might send — same pattern as PATCH /:id: a mentor deleting an
+// assigned student's session relies on the session row itself via
+// canAccessStudent.
 router.delete('/:id', async (req, res) => {
   const sid = parseInt(req.params.id, 10);
   if (!sid || isNaN(sid)) {
@@ -420,17 +661,36 @@ router.delete('/:id', async (req, res) => {
     return res.status(401).json({ error: 'Not authenticated.' });
   }
 
+  // Students can never delete a session, not even their own — the product
+  // rule is "select existing sessions only." This is a blanket role gate,
+  // not an ownership check, so a student can't even use this route to probe
+  // whether a given session id exists.
+  if (actingUser.role === 'student') {
+    return res.status(403).json({ error: 'You do not have permission to delete sessions.' });
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const check = await client.query(
-      'SELECT id FROM learning_sessions WHERE id = $1 AND user_id = $2',
-      [sid, actingUser.id]
+      'SELECT id, user_id FROM learning_sessions WHERE id = $1',
+      [sid]
     );
     if (check.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Session not found.' });
+    }
+    const existingSession = check.rows[0];
+
+    // Admin can delete any session; mentor can delete their own session or
+    // an assigned student's session, never an unassigned student's — same
+    // rule canAccessStudent already encodes for GET /api/sessions and
+    // PATCH /:id.
+    const allowed = await canAccessStudent(actingUser, existingSession.user_id);
+    if (!allowed) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'You do not have permission to delete this session.' });
     }
 
     await client.query('DELETE FROM task_attempts WHERE session_id = $1', [sid]);

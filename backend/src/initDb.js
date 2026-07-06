@@ -383,11 +383,61 @@ async function initDb() {
     ON learning_sessions(created_by_user_id)
   `);
 
+  // Migration: created_by_user_id's FK originally had no ON DELETE behavior
+  // (implicit NO ACTION from the inline REFERENCES above), which blocks
+  // deleting a mentor/admin who has created sessions for other users. The
+  // desired behavior is that deleting the creator should never delete or
+  // block deleting anything — it should just null out created_by_user_id,
+  // leaving the session (and its real owner, user_id) untouched.
+  // confdeltype = 'n' means ON DELETE SET NULL is already in place, so this
+  // only drops + recreates the constraint the first time (or after a schema
+  // that predates this migration); it's a no-op on every subsequent boot.
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'learning_sessions_created_by_user_id_fkey'
+          AND confdeltype = 'n'
+      ) THEN
+        ALTER TABLE learning_sessions
+          DROP CONSTRAINT IF EXISTS learning_sessions_created_by_user_id_fkey;
+        ALTER TABLE learning_sessions
+          ADD CONSTRAINT learning_sessions_created_by_user_id_fkey
+          FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL;
+      END IF;
+    END $$;
+  `);
+
+  // Migration: add archived_at / archived_by_user_id to learning_sessions —
+  // lifecycle *visibility* (archived = hidden from the normal session list,
+  // but every row it owns — task_attempts, user_task_progress,
+  // learning_session_filters — stays fully intact) is orthogonal to
+  // completion *state* (status: active/completed). A session can be
+  // completed-and-archived, active-and-archived, etc. Existing sessions stay
+  // unarchived by default (archived_at IS NULL) — no backfill needed since
+  // NULL already means "not archived". archived_by_user_id uses the same
+  // ON DELETE SET NULL pattern as created_by_user_id above: deleting whoever
+  // archived a session must never delete or block deleting the session itself.
+  await pool.query(`
+    ALTER TABLE learning_sessions
+    ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ
+  `);
+  await pool.query(`
+    ALTER TABLE learning_sessions
+    ADD COLUMN IF NOT EXISTS archived_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_learning_sessions_archived_at
+    ON learning_sessions(archived_at)
+  `);
+
   // ── Mentor assignments ───────────────────────────────────────────────────
   // Links a mentor (displayed as "Professor" in the UI — the role value
-  // itself stays "mentor") to the students they can view/manage. Purely
-  // additive infrastructure for the professor/student workflow; no route
-  // reads or writes this table yet.
+  // itself stays "mentor") to the students they can view/manage. Read/written
+  // by routes/mentorAssignments.js (admin CRUD) and routes/mentorStudents.js
+  // (mentor's own roster), and queried by utils/authz.js's canAccessStudent
+  // on every mentor-scoped request.
   await pool.query(`
     CREATE TABLE IF NOT EXISTS mentor_assignments (
       id         SERIAL PRIMARY KEY,

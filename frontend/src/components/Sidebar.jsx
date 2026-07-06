@@ -125,11 +125,15 @@ export default function Sidebar({
   activeSession,
   onSessionChange,
   onCreateSession,
-  onDeleteSession,
+  onArchiveSession,
+  onRestoreSession,
   onCompleteSession,
   onReopenSession,
   canReopenSession,
-  selectedStudent,
+  viewedUser,
+  isMentorOverview,
+  requestOpenAddSession,
+  onRequestOpenAddSessionConsumed,
 }) {
   const [dbStatus, setDbStatus] = useState('checking');
   const [dbOpen, setDbOpen] = useState(false);
@@ -187,20 +191,90 @@ export default function Sidebar({
   const [sessionAddError, setSessionAddError] = useState(null);
   const [sessionAddSuccess, setSessionAddSuccess] = useState(null);
   const [sessionSaving, setSessionSaving] = useState(false);
-  const [sessionDeleting, setSessionDeleting] = useState(false);
-  const [sessionDeleteError, setSessionDeleteError] = useState(null);
+  const [sessionArchiving, setSessionArchiving] = useState(false);
+  const [sessionArchiveError, setSessionArchiveError] = useState(null);
   const [sessionActionError, setSessionActionError] = useState(null);
   const [sessionActioning, setSessionActioning] = useState(false);
 
-  useEffect(() => { setSessionActionError(null); }, [activeSession?.id]);
+  // ── Archived sessions (peek/restore) ─────────────────────────
+  // Sidebar fetches this list itself, independent of the main `sessions`
+  // prop (which only ever holds non-archived sessions) — nothing else in the
+  // app needs to react to "which sessions are archived", so this stays a
+  // self-contained, toggle-driven concern here rather than threaded through
+  // App.jsx's session-context state.
+  const [showArchived, setShowArchived] = useState(false);
+  const [archivedSessions, setArchivedSessions] = useState([]);
+  const [archivedLoading, setArchivedLoading] = useState(false);
+  const [archivedError, setArchivedError] = useState(null);
+  const [restoringId, setRestoringId] = useState(null);
+  const [restoreError, setRestoreError] = useState(null);
 
-  // A student-context switch (selecting a different student, or clearing
-  // back to the professor's own sessions) should not leave a stale
-  // "created for <student>" confirmation hanging around indefinitely.
-  // Deliberately NOT keyed on activeSession?.id — creating a session for
-  // the selected student refreshes and can auto-pick that very session as
-  // active, which would otherwise wipe the message before it's ever seen.
-  useEffect(() => { setSessionAddSuccess(null); }, [selectedStudent?.id, activeUser?.id]);
+  // Clears any stale action/archive error whenever the session context
+  // changes — e.g. a successful archive switches to a fallback session (or to
+  // none), or the viewer switches to reviewing a different user. Without
+  // this, an error from a previous action (or a failed archive of a
+  // *different* session) would linger on screen next to an already-valid,
+  // already-open session. A genuine error from the action that's currently
+  // in flight is set again right after this by its own handler, so it isn't lost.
+  useEffect(() => { setSessionActionError(null); setSessionArchiveError(null); }, [activeSession?.id, viewedUser?.id]);
+
+  // A viewed-user context switch should never leave a *previous* reviewed
+  // user's archived-session list on screen — collapse the toggle and clear
+  // whatever was loaded so the next open fetches fresh, correctly-scoped data.
+  useEffect(() => {
+    setShowArchived(false);
+    setArchivedSessions([]);
+    setArchivedError(null);
+    setRestoreError(null);
+  }, [viewedUser?.id, activeUser?.id]);
+
+  function loadArchivedSessions() {
+    const targetUserId = viewedUser ? viewedUser.id : undefined;
+    setArchivedLoading(true);
+    setArchivedError(null);
+    api.sessions.list(targetUserId, true)
+      .then(list => setArchivedSessions(list.filter(s => s.archived_at)))
+      .catch(err => setArchivedError(err.message))
+      .finally(() => setArchivedLoading(false));
+  }
+
+  function toggleShowArchived() {
+    const opening = !showArchived;
+    setShowArchived(opening);
+    if (opening) loadArchivedSessions();
+  }
+
+  async function handleRestoreClick(sessionId) {
+    setRestoreError(null);
+    setRestoringId(sessionId);
+    try {
+      await onRestoreSession(sessionId);
+      setArchivedSessions(prev => prev.filter(s => s.id !== sessionId));
+    } catch (err) {
+      setRestoreError(err.message);
+    } finally {
+      setRestoringId(null);
+    }
+  }
+
+  // A viewed-user context switch (reviewing a different user, or clearing
+  // back to the viewer's own sessions) should not leave a stale "created for
+  // <user>" confirmation hanging around indefinitely. Deliberately NOT keyed
+  // on activeSession?.id — creating a session for the viewed user refreshes
+  // and can auto-pick that very session as active, which would otherwise
+  // wipe the message before it's ever seen.
+  useEffect(() => { setSessionAddSuccess(null); }, [viewedUser?.id, activeUser?.id]);
+
+  // Lets ProgressView's no-session empty state open this same create-session
+  // form (mirrors the autoOpenPlanEditor pattern in App.jsx) — Sidebar stays
+  // the single owner of the form; it just gets told to open when asked.
+  useEffect(() => {
+    if (requestOpenAddSession) {
+      openAddSession();
+      onRequestOpenAddSessionConsumed?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestOpenAddSession]);
 
   // Invalidate the table cache whenever the active session (and thus dataset) changes.
   // If the DB tree is already open, reload immediately for the new session.
@@ -289,12 +363,12 @@ export default function Sidebar({
       setNewSessionName('');
       setNewSessionDescription('');
       setSelectedDatasetId(null);
-      // Sessions created for a selected student don't show up in this
-      // sidebar's own session dropdown (GET /api/sessions still only
-      // returns the logged-in user's sessions) — surface a clear
-      // confirmation instead of silently doing nothing visible.
-      if (result?.createdForStudent) {
-        setSessionAddSuccess(`Session "${nameForMessage}" created for ${selectedStudent?.username || 'the selected student'}. It will appear in their own account.`);
+      // A session created for the viewed user does become the selected
+      // session immediately (App.jsx's handleCreateSession), but it's still
+      // worth an explicit confirmation naming whose account it belongs to —
+      // the dropdown alone doesn't make that ownership obvious.
+      if (result?.createdForViewedUser) {
+        setSessionAddSuccess(`Session "${nameForMessage}" created for ${viewedUser?.username || 'the viewed user'}. Now choose what this student should practice.`);
       } else {
         setSessionAddSuccess(null);
       }
@@ -305,20 +379,20 @@ export default function Sidebar({
     }
   }
 
-  async function handleDeleteSession() {
+  async function handleArchiveSession() {
     if (!activeSession) return;
     const confirmed = window.confirm(
-      `Are you sure you want to delete session "${activeSession.name}"? This will delete all progress and activity for this session.`
+      `Archive session "${activeSession.name}"? It will be hidden from your session list, but all progress and history will be kept. You can restore it later from "Show archived sessions".`
     );
     if (!confirmed) return;
-    setSessionDeleting(true);
-    setSessionDeleteError(null);
+    setSessionArchiving(true);
+    setSessionArchiveError(null);
     try {
-      await onDeleteSession();
+      await onArchiveSession();
     } catch (err) {
-      setSessionDeleteError(err.message);
+      setSessionArchiveError(err.message);
     } finally {
-      setSessionDeleting(false);
+      setSessionArchiving(false);
     }
   }
 
@@ -386,15 +460,32 @@ export default function Sidebar({
   
         {/* ── Session Switcher ───────────────────────────────── */}
         <div className="sidebar-session">
+          {isMentorOverview ? (
+            // Admin reviewing a mentor: the main panel shows that mentor's
+            // assigned-student roster (Mentor Overview), not their own
+            // sessions — showing "Sessions for: <mentor>" here would
+            // misleadingly imply the sidebar/dropdown still drives the main
+            // context. Replaced entirely rather than just relabeled, since
+            // there is no "session" concept to switch between in this mode.
+            <div className="sidebar-mentor-overview-note">
+              <div className="sidebar-session-label">Viewing professor overview</div>
+              <p className="sidebar-mentor-overview-text">
+                Showing students assigned to <strong>{viewedUser?.username}</strong>. Select a student in the main panel to review their sessions and progress.
+              </p>
+            </div>
+          ) : (
+          <>
           <div className="sidebar-session-row">
-            {selectedStudent ? (
-              <OverflowLabel
-                text={`Sessions for: ${selectedStudent.username}`}
-                className="sidebar-session-label sidebar-session-label--student"
-              />
-            ) : (
-              <span className="sidebar-session-label">Session</span>
-            )}
+            <div className="sidebar-session-header">
+              {viewedUser ? (
+                <OverflowLabel
+                  text={`Sessions for: ${viewedUser.username}`}
+                  className="sidebar-session-label sidebar-session-label--student"
+                />
+              ) : (
+                <span className="sidebar-session-label">Session</span>
+              )}
+            </div>
             <div className="sidebar-session-controls">
               <SidebarDropdown
                 options={sessions.map(s => {
@@ -409,30 +500,36 @@ export default function Sidebar({
                 value={activeSession?.id ?? null}
                 onChange={id => { const s = sessions.find(s => s.id === id); if (s) { setSessionAddSuccess(null); onSessionChange(s); onNavigate('progress'); } }}
                 disabled={sessions.length === 0}
-                placeholder={selectedStudent ? 'No sessions for this student yet.' : 'No sessions'}
+                placeholder={viewedUser ? 'No sessions for this user yet.' : 'No sessions yet'}
               />
-              <button
-                className="sidebar-add-session-btn"
-                onClick={openAddSession}
-                title="New session"
-              >+</button>
-              <button
-                className="sidebar-delete-session-btn"
-                onClick={handleDeleteSession}
-                title="Delete session"
-                disabled={!activeSession || sessionDeleting}
-              >🗑</button>
+              {activeUser?.role !== 'student' && (
+                <button
+                  className="sidebar-add-session-btn"
+                  onClick={openAddSession}
+                  title="New session"
+                >+</button>
+              )}
+              {activeUser?.role !== 'student' && (
+                <button
+                  className="sidebar-archive-session-btn"
+                  onClick={handleArchiveSession}
+                  title="Archive session"
+                  disabled={!activeSession || sessionArchiving}
+                >🗄</button>
+              )}
             </div>
           </div>
-  
-          {sessionDeleteError && (
-            <div className="sidebar-add-session-error">{sessionDeleteError}</div>
+
+          {sessionArchiveError && (
+            <div className="sidebar-add-session-error">{sessionArchiveError}</div>
           )}
   
-          {activeSession && (
+          {activeSession && !activeSession.archived_at && (
             activeSession.status === 'completed' ? (
-              // Students should not see the Reopen action at all — backend
-              // enforces this independently (canReopenSession is UX only).
+              // Reopen stays available while reviewing — admin/mentor are
+              // allowed to reopen an assigned/any session, unlike Complete
+              // below. Students should not see the Reopen action at all —
+              // backend enforces this independently (canReopenSession is UX only).
               canReopenSession && (
                 <button
                   className="sidebar-session-action sidebar-session-reopen"
@@ -443,13 +540,26 @@ export default function Sidebar({
                 </button>
               )
             ) : (
-              <button
-                className="sidebar-session-action sidebar-session-complete"
-                onClick={handleCompleteClick}
-                disabled={sessionActioning}
-              >
-                {sessionActioning ? 'Completing…' : 'Complete session'}
-              </button>
+              // Unlike create/delete/edit/reopen, completing a session is
+              // allowed for students too — they legitimately complete their
+              // own session once the existing completion conditions are met.
+              // But it is ownership-only server-side, so it's never shown
+              // while reviewing someone else's session (viewedUser set) —
+              // the button would otherwise always fail with a generic error.
+              !viewedUser && (
+                <>
+                  <p className="sidebar-complete-hint">
+                    Complete this session after you run every selected task at least once.
+                  </p>
+                  <button
+                    className="sidebar-session-action sidebar-session-complete"
+                    onClick={handleCompleteClick}
+                    disabled={sessionActioning}
+                  >
+                    {sessionActioning ? 'Completing…' : 'Complete session'}
+                  </button>
+                </>
+              )
             )
           )}
   
@@ -461,11 +571,11 @@ export default function Sidebar({
             <div className="sidebar-add-session-success">{sessionAddSuccess}</div>
           )}
 
-          {showAddSession && (
+          {showAddSession && activeUser?.role !== 'student' && (
             <div className="sidebar-add-session-form">
-              {selectedStudent && (
+              {viewedUser && (
                 <div className="sidebar-add-session-target-hint">
-                  Creating session for: <strong>{selectedStudent.username}</strong>
+                  Creating session for: <strong>{viewedUser.username}</strong>
                 </div>
               )}
               <input
@@ -516,8 +626,50 @@ export default function Sidebar({
               {sessionAddError && <div className="sidebar-add-session-error">{sessionAddError}</div>}
             </div>
           )}
+
+          {activeUser?.role !== 'student' && (
+            <div className="sidebar-archived-section">
+              <button
+                type="button"
+                className="sidebar-archived-toggle"
+                onClick={toggleShowArchived}
+              >
+                <span className="nav-arrow">{showArchived ? '▾' : '▸'}</span>
+                {showArchived ? 'Hide archived sessions' : 'Show archived sessions'}
+              </button>
+
+              {showArchived && (
+                <div className="sidebar-archived-list">
+                  {archivedLoading && <div className="sidebar-archived-loading">Loading…</div>}
+                  {archivedError && <div className="sidebar-add-session-error">{archivedError}</div>}
+                  {restoreError && <div className="sidebar-add-session-error">{restoreError}</div>}
+                  {!archivedLoading && !archivedError && archivedSessions.length === 0 && (
+                    <div className="sidebar-archived-empty">
+                      {viewedUser ? `No archived sessions for ${viewedUser.username}.` : 'No archived sessions.'}
+                    </div>
+                  )}
+                  {archivedSessions.map(s => (
+                    <div key={s.id} className="sidebar-archived-item">
+                      <OverflowLabel text={s.name} className="sidebar-archived-item-name" />
+                      <button
+                        type="button"
+                        className="sidebar-archived-restore-btn"
+                        onClick={() => handleRestoreClick(s.id)}
+                        disabled={restoringId === s.id}
+                        title="Restore session"
+                      >
+                        {restoringId === s.id ? 'Restoring…' : 'Restore'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          </>
+          )}
         </div>
-  
+
         {/* ── Navigation ─────────────────────────────────────── */}
         <nav className="sidebar-nav">
           <div className="nav-section">

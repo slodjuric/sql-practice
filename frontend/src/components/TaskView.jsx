@@ -279,7 +279,7 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
 
   async function runQuery() {
     if (!sql.trim()) return;
-    if (activeSession?.status === 'completed') return;
+    if (activeSession?.status === 'completed' || activeSession?.archived_at) return;
     if (!task || !matchesSessionFilters(task, sessionFilters)) return;
     localStorage.setItem(practiceKey, sql);
     setIsLoading(true);
@@ -312,7 +312,7 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
 
   async function checkAnswer() {
     if (!sql.trim()) return;
-    if (activeSession?.status === 'completed') return;
+    if (activeSession?.status === 'completed' || activeSession?.archived_at) return;
     localStorage.setItem(practiceKey, sql);
     setIsLoading(true);
     setError(null);
@@ -446,6 +446,13 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
           </div>
         )}
 
+        {/* Archived session banner */}
+        {activeSession?.archived_at && (
+          <div className="session-archived-banner">
+            This session is archived. Restore it from "Show archived sessions" in the sidebar to continue working.
+          </div>
+        )}
+
         {/* Check result banner */}
         <CheckBanner checkResult={checkResult} sql={sql} />
 
@@ -454,7 +461,7 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
           <div className="editor-header">
             <span className="editor-label">Your SQL</span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              {isActive && activeSession?.status !== 'completed' && (
+              {isActive && activeSession?.status !== 'completed' && !activeSession?.archived_at && (
                 <button className="btn btn-secondary btn-copy" onClick={pasteFromClipboard}>
                   {pastedClipboard ? 'Pasted!' : 'Paste'}
                 </button>
@@ -466,7 +473,7 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
             onChange={setSql}
             onRun={runQuery}
             minHeight={140}
-            readOnly={!isActive || activeSession?.status === 'completed'}
+            readOnly={!isActive || activeSession?.status === 'completed' || !!activeSession?.archived_at}
           />
         </div>
 
@@ -475,14 +482,14 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
           <button
             className="btn btn-primary"
             onClick={runQuery}
-            disabled={isLoading || !sql.trim() || activeSession?.status === 'completed' || !isActive}
+            disabled={isLoading || !sql.trim() || activeSession?.status === 'completed' || !!activeSession?.archived_at || !isActive}
           >
             ▶ Run Query
           </button>
           <button
             className="btn btn-success"
             onClick={checkAnswer}
-            disabled={isLoading || !sql.trim() || activeSession?.status === 'completed' || !isActive}
+            disabled={isLoading || !sql.trim() || activeSession?.status === 'completed' || !!activeSession?.archived_at || !isActive}
           >
             ✓ Check Answer
           </button>

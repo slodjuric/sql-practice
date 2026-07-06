@@ -7,7 +7,23 @@ import QueryPlayground from './components/QueryPlayground';
 import ProgressView from './components/ProgressView';
 import UserManagementView from './components/UserManagementView';
 import MyStudentsView from './components/MyStudentsView';
+import MentorOverviewView from './components/MentorOverviewView';
 import { api } from './api';
+import { roleLabel } from './utils/roleLabels';
+
+// Roles that can review another user's sessions/progress. Students never can.
+function canViewOthers(role) {
+  return role === 'mentor' || role === 'admin';
+}
+
+// A professor's own owned sessions are rarely meaningful (their job is
+// managing students, not solving tasks) — when admin reviews a mentor,
+// show the assigned-student roster (MentorOverviewView) instead of the
+// normal ProgressView. This never applies to a mentor's own review of a
+// student (that viewedUser is always role 'student', see My Students).
+function showsMentorOverview(activeUser, viewedUser) {
+  return activeUser?.role === 'admin' && viewedUser?.role === 'mentor';
+}
 
 export default function App() {
   const [currentView, setCurrentView] = useState('progress');
@@ -31,19 +47,26 @@ export default function App() {
   const [progressVersion, setProgressVersion] = useState(0);
   const [openPlanEditorOnProgress, setOpenPlanEditorOnProgress] = useState(false);
 
-  // ── Selected student context (professor viewing a student) ────
-  // Purely a UI context flag for now — { id, username, role } of the
-  // student a professor clicked into from My Students. NOT the acting
-  // identity: activeUser always stays the logged-in user. No API call in
-  // this step reads selectedStudent — Progress/Sessions/Practice still
-  // fetch the logged-in user's own data until a later step wires it up.
-  const [selectedStudent, setSelectedStudent] = useState(null);
+  // Lets ProgressView's no-session empty state trigger Sidebar's existing
+  // create-session form (mirrors the autoOpenPlanEditor pattern above) —
+  // Sidebar remains the single owner of that form, ProgressView never
+  // duplicates it.
+  const [requestOpenAddSession, setRequestOpenAddSession] = useState(false);
 
-  // Only students are structurally barred from ever having a selected
-  // student (there is no UI path for them to set one, but this guards
-  // against a stale value surviving a role change without a full reload).
+  // ── Viewed-user context (mentor/admin reviewing another user) ──
+  // A UI context flag: { id, username, role } of the user a mentor clicked
+  // into from My Students (later: an admin from User Management). NOT the
+  // acting identity — activeUser always stays the logged-in user. Only
+  // affects read/review/session-management context (sessions list, plan
+  // edit/delete/reopen, progress); Practice's run/check remain hard-scoped
+  // to activeUser regardless of viewedUser — see canViewOthers() above.
+  const [viewedUser, setViewedUser] = useState(null);
+
+  // Only students are structurally barred from ever having a viewed user
+  // (there is no UI path for them to set one, but this guards against a
+  // stale value surviving a role change without a full reload).
   useEffect(() => {
-    if (activeUser?.role === 'student') setSelectedStudent(null);
+    if (activeUser?.role === 'student') setViewedUser(null);
   }, [activeUser?.role]);
 
   // Check for an existing session on mount — a 401 here just means
@@ -55,21 +78,26 @@ export default function App() {
       .finally(() => setAuthLoading(false));
   }, []);
 
-  // Default landing page for professors, and clearing any selected-student
-  // context from a previous login — both keyed on activeUser?.id so they
-  // only fire when the logged-in user actually changes, never on every
-  // activeUser re-render or on in-session navigation.
+  // Default landing page per role, and clearing any viewed-user context from
+  // a previous login — both keyed on activeUser?.id so they only fire when
+  // the logged-in user actually changes, never on every activeUser
+  // re-render or on in-session navigation. Mentor lands on My Students,
+  // admin lands on User Management (their own Progress isn't a meaningful
+  // default — see the role-system analysis); student keeps the unchanged
+  // default of 'progress'.
   useEffect(() => {
-    setSelectedStudent(null);
+    setViewedUser(null);
     if (activeUser?.role === 'mentor') {
       setCurrentView('my-students');
+    } else if (activeUser?.role === 'admin') {
+      setCurrentView('users');
     }
   }, [activeUser?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Loads sessions for the current "session context": the selected
-  // student's sessions when a professor is viewing one, otherwise the
-  // logged-in user's own sessions. Shared by the effect below and by
-  // handleCreateSession's post-create refresh for a selected student.
+  // Loads sessions for the current "session context": the viewed user's
+  // sessions when a mentor/admin is reviewing one, otherwise the logged-in
+  // user's own sessions. Shared by the effect below and by
+  // handleCreateSession's post-create refresh for a viewed user.
   function loadSessionsForContext() {
     if (!activeUser) {
       setSessions([]);
@@ -77,17 +105,17 @@ export default function App() {
       return Promise.resolve();
     }
 
-    const targetUserId = (activeUser.role === 'mentor' && selectedStudent) ? selectedStudent.id : null;
+    const targetUserId = (canViewOthers(activeUser.role) && viewedUser) ? viewedUser.id : null;
 
     return api.sessions.list(targetUserId)
       .then(list => {
         setSessions(list);
 
         if (targetUserId) {
-          // Viewing a student's sessions for display only — do not call
+          // Viewing another user's sessions for display only — do not call
           // api.sessions.open (that PATCH route is unchanged this step and
           // scoped to the acting user's own sessions), and don't persist to
-          // localStorage since this isn't the professor's own last-used session.
+          // localStorage since this isn't the viewer's own last-used session.
           const byLastOpened = list
             .filter(s => s.last_opened_at)
             .sort((a, b) => new Date(b.last_opened_at) - new Date(a.last_opened_at));
@@ -115,12 +143,12 @@ export default function App() {
       .catch(() => {});
   }
 
-  // Reloads whenever the logged-in user or the selected-student context
-  // changes — covers login/logout, a professor selecting a student, and a
-  // professor clearing that selection back to their own sessions.
+  // Reloads whenever the logged-in user or the viewed-user context
+  // changes — covers login/logout, a mentor/admin selecting a user to
+  // review, and clearing that selection back to their own sessions.
   useEffect(() => {
     loadSessionsForContext();
-  }, [activeUser, selectedStudent]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeUser, viewedUser]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load filters whenever the active session changes.
   // Also clear the selected table so DatabaseView never loads a stale table
@@ -150,7 +178,7 @@ export default function App() {
     setActiveUser(null);
     setSessions([]);
     setActiveSession(null);
-    setSelectedStudent(null);
+    setViewedUser(null);
     setCurrentView('progress');
   }
 
@@ -168,7 +196,7 @@ export default function App() {
     setActiveUser(null);
     setSessions([]);
     setActiveSession(null);
-    setSelectedStudent(null);
+    setViewedUser(null);
     setCurrentView('progress');
   }
 
@@ -177,33 +205,38 @@ export default function App() {
     setActiveSession(session);
     if (!session || !activeUser) return;
 
-    // Sessions shown while viewing a selected student belong to that
-    // student, not the professor — PATCH /:id/open is unchanged this step
-    // and scoped to the acting user's own sessions, so skip it (it would
-    // just 404) and don't persist it under the professor's own localStorage key.
-    if (activeUser.role === 'mentor' && selectedStudent) return;
+    // Sessions shown while reviewing a viewed user belong to that user, not
+    // the viewer — PATCH /:id/open is unchanged this step and scoped to the
+    // acting user's own sessions, so skip it (it would just 404) and don't
+    // persist it under the viewer's own localStorage key.
+    if (canViewOthers(activeUser.role) && viewedUser) return;
 
     localStorage.setItem(`activeSessionId:user:${activeUser.id}`, String(session.id));
     api.sessions.open(session.id).catch(() => {});
   }
 
   async function handleCreateSession(name, description, planType = 'topic', topics = [], difficulties = [], projects = [], categories = [], datasetId = null) {
-    // Only a professor with a selected student targets someone else — every
-    // other case (student, admin, professor with no selection) omits
-    // targetUserId and keeps the exact self-creation behavior from before.
-    const targetUserId = (activeUser?.role === 'mentor' && selectedStudent) ? selectedStudent.id : null;
+    // Only a mentor/admin with a viewed user targets someone else — every
+    // other case (student, or no viewed user) omits targetUserId and keeps
+    // the exact self-creation behavior from before.
+    const targetUserId = (canViewOthers(activeUser?.role) && viewedUser) ? viewedUser.id : null;
     const { session, filters } = await api.sessions.create(name, description, planType, topics, difficulties, projects, categories, datasetId, targetUserId);
 
     if (targetUserId) {
-      // The created session belongs to the student, not the professor.
-      // GET /api/sessions can now read the selected student's sessions
-      // (this step), so refresh that list to show the new session — but
-      // deliberately do not auto-select/open it: Progress still isn't
-      // wired to the selected student, so forcing it "active" wouldn't
-      // show anything meaningful yet. loadSessionsForContext's normal
-      // "most recently opened, else first" pick decides on its own.
-      await loadSessionsForContext();
-      return { session, filters, createdForStudent: true };
+      // The created session belongs to the viewed user, not the viewer, but
+      // it should still become the active session in this review context
+      // immediately — mirrors the self-creation path below exactly.
+      // handleSessionChange sets activeSession unconditionally but skips
+      // localStorage + api.sessions.open() whenever canViewOthers(role) &&
+      // viewedUser is true, so this never touches the viewed user's own
+      // last_opened_at (PATCH /:id/open is self-only by design) or the
+      // viewer's own localStorage key.
+      setSessions(prev => [...prev, session]);
+      handleSessionChange(session);
+      setSessionFilters(filters);
+      setOpenPlanEditorOnProgress(true);
+      setCurrentView('progress');
+      return { session, filters, createdForViewedUser: true };
     }
 
     setSessions(prev => [...prev, session]);
@@ -222,20 +255,43 @@ export default function App() {
     return { session, filters };
   }
 
-  async function handleDeleteSession() {
+  // Archive is the normal user-facing way to remove a session from the
+  // visible list — it preserves all history and is restorable (see
+  // handleRestoreSession below). Falls back to another session exactly like
+  // the old hard-delete flow did, but correctly guards the viewedUser case
+  // (mirrors handleSessionChange's guard above): while reviewing another
+  // user's sessions, never touch the viewer's own localStorage key or call
+  // the self-only PATCH /:id/open route on the reviewed user's behalf.
+  async function handleArchiveSession() {
     if (!activeSession || !activeUser) return;
-    const deletedId = activeSession.id;
-    await api.sessions.delete(deletedId);
-    localStorage.removeItem(`activeSessionId:user:${activeUser.id}`);
-    const remaining = sessions.filter(s => s.id !== deletedId);
+    const archivedId = activeSession.id;
+    await api.sessions.archive(archivedId);
+
+    const remaining = sessions.filter(s => s.id !== archivedId);
     setSessions(remaining);
     const nextSession = remaining[0] || null;
-    setActiveSession(nextSession);
-    if (nextSession) {
-      localStorage.setItem(`activeSessionId:user:${activeUser.id}`, String(nextSession.id));
-      api.sessions.open(nextSession.id).catch(() => {});
+
+    if (canViewOthers(activeUser.role) && viewedUser) {
+      setActiveSession(nextSession);
+    } else {
+      localStorage.removeItem(`activeSessionId:user:${activeUser.id}`);
+      setActiveSession(nextSession);
+      if (nextSession) {
+        localStorage.setItem(`activeSessionId:user:${activeUser.id}`, String(nextSession.id));
+        api.sessions.open(nextSession.id).catch(() => {});
+      }
     }
     setCurrentView('progress');
+  }
+
+  // Restoring a session only brings it back into the visible list — it
+  // deliberately does NOT make it the active session (avoids silently
+  // switching the user's current focus to an old, possibly stale plan). The
+  // simplest, safest refresh is to reload the canonical list for whichever
+  // context (self or reviewed user) is currently active.
+  async function handleRestoreSession(sessionId) {
+    await api.sessions.restore(sessionId);
+    await loadSessionsForContext();
   }
 
   // Mirrors backend canReopenSession() (backend/src/utils/authz.js) for UX
@@ -280,29 +336,42 @@ export default function App() {
       setPracticeTarget(null);
       setPracticeCategory(null);
     }
-    // Going back to My Students is treated as leaving the selected-student
-    // context, so a professor doesn't land back on Progress still "viewing"
-    // a student they navigated away from.
-    if (view === 'my-students') {
-      setSelectedStudent(null);
+    // Going back to My Students (mentor) or User Management (admin) is
+    // treated as leaving the viewed-user context, so the viewer doesn't land
+    // back on Progress still "viewing" a user they navigated away from.
+    if (view === 'my-students' || view === 'users') {
+      setViewedUser(null);
     }
     setCurrentView(view);
   }
 
-  // Sets selected-student context from My Students and jumps to Progress.
-  // Progress does not yet fetch this student's data (Step F is context-only
-  // — see the viewing banner below); that wiring is a later step.
-  function handleSelectStudent(student) {
-    if (activeUser?.role !== 'mentor' || !student) return;
-    setSelectedStudent({ id: student.id, username: student.username, role: student.role });
+  // Sets the viewed-user context — from My Students (mentor) or User
+  // Management's "Review" action (admin) — and jumps to Progress.
+  function handleSelectViewedUser(user) {
+    if (!canViewOthers(activeUser?.role) || !user) return;
+    setViewedUser({ id: user.id, username: user.username, role: user.role });
     handleNavigate('progress');
   }
 
-  function handleClearSelectedStudent() {
-    setSelectedStudent(null);
+  function handleClearViewedUser() {
+    setViewedUser(null);
     if (activeUser?.role === 'mentor') {
       handleNavigate('my-students');
+    } else if (activeUser?.role === 'admin') {
+      handleNavigate('users');
     }
+  }
+
+  // A direct shortcut back to the viewer's own Progress, without going
+  // through My Students/User Management first — clicking the "Progress" nav
+  // item alone doesn't clear viewedUser (that's still whichever session
+  // context was active), so this is the one explicit way to leave review
+  // mode from anywhere. setViewedUser(null) must happen before/alongside
+  // handleNavigate('progress') here since handleNavigate only clears
+  // viewedUser for the 'my-students'/'users' targets, not 'progress'.
+  function handleViewOwnProgress() {
+    setViewedUser(null);
+    handleNavigate('progress');
   }
 
   function openTaskFromProgress({ taskId, topicId, attemptSql }) {
@@ -348,6 +417,12 @@ export default function App() {
             onPracticeCategoryConsumed={() => setPracticeCategory(null)}
             onProgressInvalidate={handleProgressInvalidate}
             onBackToProgress={() => handleNavigate('progress')}
+            // Display-only — a mentor/admin may reach Practice from a
+            // reviewed student's task list. Never used for any API call:
+            // run/check remain hard-scoped to activeUser/activeSession
+            // regardless of this prop. Purely drives the safety notice
+            // shown above TaskView.
+            viewedUser={canViewOthers(activeUser?.role) ? viewedUser : null}
           />
         );
       case 'database':
@@ -362,14 +437,22 @@ export default function App() {
           />
         );
       case 'progress': {
-        // Only a professor with a selected student views someone else's
-        // progress — every other case (student, admin, professor with no
-        // selection) omits targetUserId and sees their own, unchanged.
-        const progressTargetUserId = (activeUser?.role === 'mentor' && selectedStudent) ? selectedStudent.id : null;
+        // Admin reviewing a mentor sees that mentor's assigned-student
+        // roster instead of their own (likely empty/irrelevant) sessions —
+        // see showsMentorOverview() above. Reviewing a student (by admin or
+        // mentor) is unaffected and still goes to the normal ProgressView.
+        if (showsMentorOverview(activeUser, viewedUser)) {
+          return <MentorOverviewView mentor={viewedUser} onReviewStudent={handleSelectViewedUser} />;
+        }
+
+        // Only a mentor/admin with a viewed user reviews someone else's
+        // progress — every other case (student, or no viewed user) omits
+        // targetUserId and sees their own, unchanged.
+        const progressTargetUserId = (canViewOthers(activeUser?.role) && viewedUser) ? viewedUser.id : null;
         return (
           <ProgressView
             activeUser={activeUser}
-            selectedStudent={progressTargetUserId ? selectedStudent : null}
+            viewedUser={progressTargetUserId ? viewedUser : null}
             targetUserId={progressTargetUserId}
             activeSession={activeSession}
             sessionFilters={sessionFilters}
@@ -380,14 +463,17 @@ export default function App() {
             progressVersion={progressVersion}
             autoOpenPlanEditor={openPlanEditorOnProgress}
             onAutoOpenPlanEditorConsumed={() => setOpenPlanEditorOnProgress(false)}
+            onRequestCreateSession={() => setRequestOpenAddSession(true)}
           />
         );
       }
       case 'users':
-        return activeUser?.role === 'admin' ? <UserManagementView /> : null;
+        return activeUser?.role === 'admin'
+          ? <UserManagementView onReviewUser={handleSelectViewedUser} />
+          : null;
       case 'my-students':
         return activeUser?.role === 'mentor'
-          ? <MyStudentsView onSelectStudent={handleSelectStudent} />
+          ? <MyStudentsView onSelectStudent={handleSelectViewedUser} />
           : null;
       default:
         return <PracticeView activeUser={activeUser} activeSession={activeSession} />;
@@ -416,22 +502,35 @@ export default function App() {
         activeSession={activeSession}
         onSessionChange={handleSessionChange}
         onCreateSession={handleCreateSession}
-        onDeleteSession={handleDeleteSession}
+        onArchiveSession={handleArchiveSession}
+        onRestoreSession={handleRestoreSession}
         onCompleteSession={handleCompleteSession}
         onReopenSession={handleReopenSession}
         canReopenSession={canReopenSession(activeUser)}
-        selectedStudent={activeUser?.role === 'mentor' ? selectedStudent : null}
+        viewedUser={canViewOthers(activeUser?.role) ? viewedUser : null}
+        isMentorOverview={showsMentorOverview(activeUser, viewedUser)}
+        requestOpenAddSession={requestOpenAddSession}
+        onRequestOpenAddSessionConsumed={() => setRequestOpenAddSession(false)}
       />
       <main className="main-content">
-        {selectedStudent && activeUser?.role !== 'student' && (
+        {viewedUser && canViewOthers(activeUser?.role) && (
           <div className="viewing-banner">
             <span className="viewing-banner-text">
-              Viewing student: <strong>{selectedStudent.username}</strong>.
-              {' '}Sessions and Progress are connected. Practice actions remain your own.
+              Viewing: <strong>{viewedUser.username}</strong> ({roleLabel(viewedUser.role)}).
+              {' '}{showsMentorOverview(activeUser, viewedUser)
+                ? "Showing this professor's assigned students, not their own sessions."
+                : 'Sessions and Progress are connected. Practice actions remain your own.'}
             </span>
-            <button className="viewing-banner-clear" onClick={handleClearSelectedStudent}>
-              {activeUser?.role === 'mentor' ? 'Back to My Students' : 'Clear selection'}
-            </button>
+            <div className="viewing-banner-actions">
+              <button className="viewing-banner-own-progress" onClick={handleViewOwnProgress}>
+                View my progress
+              </button>
+              <button className="viewing-banner-clear" onClick={handleClearViewedUser}>
+                {activeUser?.role === 'mentor' ? 'Back to My Students'
+                  : activeUser?.role === 'admin' ? 'Back to User Management'
+                  : 'Clear selection'}
+              </button>
+            </div>
           </div>
         )}
         {renderView()}

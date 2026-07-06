@@ -11,6 +11,15 @@
  * resolve it from the session and must not honor a spoofed ?userId= or
  * reveal another user's session by id.
  *
+ * GET /:id/filters authorization (cases 6, 8-11): fetches the session by id
+ * first, then authorizes via canAccessStudent(actingUser, session.user_id) —
+ * same pattern as PATCH/DELETE /:id. A session that exists but isn't
+ * accessible returns 403 (case 6, 9); a session that truly doesn't exist
+ * returns 404 (case 7). This mirrors GET /api/sessions and fixes a prior bug
+ * where this route was scoped to `WHERE user_id = actingUser.id` only, which
+ * made a mentor/admin reviewing an assigned user's session always 404 —
+ * silently resetting Edit Plan to empty filters.
+ *
  * Requires a live DB connection (reads DB config from backend/.env).
  *
  * Run: npm run test:sessions-read-authz
@@ -43,17 +52,26 @@ function fail(id, name, detail) {
 
 async function cleanup() {
   await pool.query(
+    "DELETE FROM learning_session_filters WHERE session_id IN (SELECT id FROM learning_sessions WHERE name LIKE $1)",
+    [`${PREFIX}%`]
+  );
+  await pool.query(
     "DELETE FROM learning_sessions WHERE name LIKE $1",
+    [`${PREFIX}%`]
+  );
+  await pool.query(
+    `DELETE FROM mentor_assignments WHERE mentor_id IN (SELECT id FROM users WHERE username LIKE $1)
+       OR student_id IN (SELECT id FROM users WHERE username LIKE $1)`,
     [`${PREFIX}%`]
   );
   await pool.query('DELETE FROM users WHERE username LIKE $1', [`${PREFIX}%`]);
 }
 
-async function createUser(username) {
+async function createUser(username, role = 'student') {
   const hash = await bcrypt.hash(TEST_PASSWORD, 10);
   const r = await pool.query(
     'INSERT INTO users (username, role, password_hash) VALUES ($1, $2, $3) RETURNING id',
-    [username, 'student', hash]
+    [username, role, hash]
   );
   return r.rows[0].id;
 }
@@ -175,14 +193,17 @@ async function run() {
       }
     }
 
-    // ── Case 6: another user's session filters return 404 ────────────────────
+    // ── Case 6: another (unrelated) user's session filters return 403 ─────────
+    // userA and userB are both plain students with no relationship —
+    // canAccessStudent(userA, userB) is false, so the session is found but
+    // access is denied: 403, not 404 (mirrors PATCH/DELETE /:id case 5/20).
     {
       const { cookie } = await login(base, userAUsername, TEST_PASSWORD);
       const res = await fetch(`${sessionsBase}/${userBSession1}/filters`, { headers: { Cookie: cookie } });
-      if (res.status === 404) {
-        pass('6', "Another user's session filters return 404 (not 403)");
+      if (res.status === 403) {
+        pass('6', "Another unrelated user's session filters return 403 (found, not authorized)");
       } else {
-        fail('6', "Another user's session filters must return 404", `status=${res.status}`);
+        fail('6', "Another unrelated user's session filters must return 403", `status=${res.status}`);
       }
     }
 
@@ -194,6 +215,171 @@ async function run() {
         pass('7', 'Nonexistent session filters return 404');
       } else {
         fail('7', 'Nonexistent session filters must return 404', `status=${res.status}`);
+      }
+    }
+
+    // ── Mentor/admin filters-authz matrix (bug fix) ───────────────────────────
+    const filtersMentorUsername = `${PREFIX}filtersMentor`;
+    const filtersStudentUsername = `${PREFIX}filtersStudent`;
+    const filtersUnassignedMentorUsername = `${PREFIX}filtersUnassignedMentor`;
+    const filtersAdminUsername = `${PREFIX}filtersAdmin`;
+    const filtersMentorId = await createUser(filtersMentorUsername, 'mentor');
+    const filtersStudentId = await createUser(filtersStudentUsername, 'student');
+    await createUser(filtersUnassignedMentorUsername, 'mentor');
+    await createUser(filtersAdminUsername, 'admin');
+    await pool.query('INSERT INTO mentor_assignments (mentor_id, student_id) VALUES ($1, $2)', [filtersMentorId, filtersStudentId]);
+    const filtersStudentSessionId = await createSession(filtersStudentId, `${PREFIX}filters_student_session`);
+    await pool.query(
+      "INSERT INTO learning_session_filters (session_id, filter_type, filter_value) VALUES ($1, 'topic', 'join'), ($1, 'difficulty', 'hard')",
+      [filtersStudentSessionId]
+    );
+
+    // ── Case 8: assigned mentor can fetch the student's real filters ──────────
+    {
+      const { cookie } = await login(base, filtersMentorUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/${filtersStudentSessionId}/filters`, { headers: { Cookie: cookie } });
+      const body = await res.json();
+      const hasRealFilters = body.topics?.includes('join') && body.difficulties?.includes('hard');
+      if (res.status === 200 && hasRealFilters) {
+        pass('8', "Assigned mentor fetches the student's real filters (200, not empty)");
+      } else {
+        fail('8', "Assigned mentor must fetch the real filters, not an empty fallback", `status=${res.status}, body=${JSON.stringify(body)}`);
+      }
+    }
+
+    // ── Case 9: unassigned mentor cannot fetch the student's filters ──────────
+    {
+      const { cookie } = await login(base, filtersUnassignedMentorUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/${filtersStudentSessionId}/filters`, { headers: { Cookie: cookie } });
+      if (res.status === 403) {
+        pass('9', "Unassigned mentor cannot fetch the student's session filters (403)");
+      } else {
+        fail('9', "Unassigned mentor must not be able to fetch another student's filters", `status=${res.status}`);
+      }
+    }
+
+    // ── Case 10: admin can fetch any user's session filters ───────────────────
+    {
+      const { cookie } = await login(base, filtersAdminUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/${filtersStudentSessionId}/filters`, { headers: { Cookie: cookie } });
+      const body = await res.json();
+      const hasRealFilters = body.topics?.includes('join') && body.difficulties?.includes('hard');
+      if (res.status === 200 && hasRealFilters) {
+        pass('10', "Admin fetches any user's real session filters (200, not empty)");
+      } else {
+        fail('10', "Admin must be able to fetch any user's session filters", `status=${res.status}, body=${JSON.stringify(body)}`);
+      }
+    }
+
+    // ── Case 11: student can fetch their own session filters (unaffected) ─────
+    {
+      const { cookie } = await login(base, filtersStudentUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/${filtersStudentSessionId}/filters`, { headers: { Cookie: cookie } });
+      const body = await res.json();
+      const hasRealFilters = body.topics?.includes('join') && body.difficulties?.includes('hard');
+      if (res.status === 200 && hasRealFilters) {
+        pass('11', "Student fetches their own session's real filters (200)");
+      } else {
+        fail('11', "Student must be able to fetch their own session's filters", `status=${res.status}, body=${JSON.stringify(body)}`);
+      }
+    }
+
+    // ── GET /api/sessions owner/creator metadata (Task 4) ─────────────────────
+    // filtersStudentSessionId was inserted directly via createSession(), which
+    // never sets created_by_user_id — it stays NULL, exercising the
+    // "deleted/never-set creator" case safely alongside the normal one below.
+
+    // ── Case 12: self session response contains owner_username/owner_role ─────
+    {
+      const { cookie } = await login(base, filtersStudentUsername, TEST_PASSWORD);
+      const res = await fetch(sessionsBase, { headers: { Cookie: cookie } });
+      const body = await res.json();
+      const row = body.find(s => s.id === filtersStudentSessionId);
+      if (res.status === 200 && row?.owner_username === filtersStudentUsername && row?.owner_role === 'student') {
+        pass('12', `Self session includes owner_username/owner_role (${row.owner_username}/${row.owner_role})`);
+      } else {
+        fail('12', 'Self session must include correct owner_username/owner_role', `status=${res.status}, row=${JSON.stringify(row)}`);
+      }
+    }
+
+    // ── Case 13: null creator is handled safely (no crash, null/absent) ───────
+    {
+      const { cookie } = await login(base, filtersStudentUsername, TEST_PASSWORD);
+      const res = await fetch(sessionsBase, { headers: { Cookie: cookie } });
+      const body = await res.json();
+      const row = body.find(s => s.id === filtersStudentSessionId);
+      if (res.status === 200 && (row?.created_by_username === null || row?.created_by_username === undefined)) {
+        pass('13', `Session with no creator set has created_by_username = ${row?.created_by_username} (no crash)`);
+      } else {
+        fail('13', 'Session with a null created_by_user_id must expose created_by_username as null, not crash or fabricate one', `status=${res.status}, row=${JSON.stringify(row)}`);
+      }
+    }
+
+    // ── Case 14: created_by_username is populated when a session was actually
+    // created by another allowed user (mentor creating for the student) ──────
+    let mentorCreatedSessionId;
+    {
+      const { cookie } = await login(base, filtersMentorUsername, TEST_PASSWORD);
+      const createRes = await fetch(sessionsBase, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: cookie },
+        body: JSON.stringify({ name: `${PREFIX}mentor_created_for_student`, targetUserId: filtersStudentId }),
+      });
+      const createBody = await createRes.json();
+      mentorCreatedSessionId = createBody.session?.id;
+      const hasCorrectFields = createBody.session?.owner_username === filtersStudentUsername
+        && createBody.session?.owner_role === 'student'
+        && createBody.session?.created_by_username === filtersMentorUsername;
+      if (createRes.status === 201 && hasCorrectFields) {
+        pass('14', `POST response already carries correct owner/creator fields (owner=${createBody.session.owner_username}, created_by=${createBody.session.created_by_username})`);
+      } else {
+        fail('14', 'POST response must carry correct owner_username/owner_role/created_by_username', `status=${createRes.status}, session=${JSON.stringify(createBody.session)}`);
+      }
+    }
+
+    // ── Case 15: mentor fetching assigned student's sessions sees correct
+    // owner_username/owner_role and the populated created_by_username ────────
+    {
+      const { cookie } = await login(base, filtersMentorUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}?targetUserId=${filtersStudentId}`, { headers: { Cookie: cookie } });
+      const body = await res.json();
+      const row = body.find(s => s.id === mentorCreatedSessionId);
+      const ok = row?.owner_username === filtersStudentUsername && row?.owner_role === 'student' && row?.created_by_username === filtersMentorUsername;
+      if (res.status === 200 && ok) {
+        pass('15', 'Mentor reviewing assigned student sees correct owner_username/owner_role/created_by_username');
+      } else {
+        fail('15', 'Mentor must see correct owner/creator fields for an assigned student\'s session', `status=${res.status}, row=${JSON.stringify(row)}`);
+      }
+    }
+
+    // ── Case 16: admin fetching any user's sessions sees correct fields ───────
+    {
+      const { cookie } = await login(base, filtersAdminUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}?targetUserId=${filtersStudentId}`, { headers: { Cookie: cookie } });
+      const body = await res.json();
+      const row = body.find(s => s.id === mentorCreatedSessionId);
+      const ok = row?.owner_username === filtersStudentUsername && row?.owner_role === 'student' && row?.created_by_username === filtersMentorUsername;
+      if (res.status === 200 && ok) {
+        pass('16', "Admin reviewing any user sees correct owner_username/owner_role/created_by_username");
+      } else {
+        fail('16', 'Admin must see correct owner/creator fields for any user\'s session', `status=${res.status}, row=${JSON.stringify(row)}`);
+      }
+    }
+
+    // ── Case 17: no password_hash or full user object ever leaks ──────────────
+    {
+      const { cookie } = await login(base, filtersAdminUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}?targetUserId=${filtersStudentId}`, { headers: { Cookie: cookie } });
+      const raw = await res.text();
+      const noPasswordLeak = !/password/i.test(raw);
+      const body = JSON.parse(raw);
+      const onlyAllowlistedUsernameKeys = body.every(row =>
+        Object.keys(row).filter(k => /username/i.test(k)).every(k => ['owner_username', 'created_by_username', 'archived_by_username'].includes(k))
+      );
+      if (res.status === 200 && noPasswordLeak && onlyAllowlistedUsernameKeys) {
+        pass('17', 'No password_hash or unexpected username-shaped field ever leaks from GET /api/sessions');
+      } else {
+        fail('17', 'GET /api/sessions must never leak password_hash or unrelated user fields', `noPasswordLeak=${noPasswordLeak}, onlyAllowlisted=${onlyAllowlistedUsernameKeys}`);
       }
     }
 
