@@ -5,28 +5,16 @@ const { tasks, taskMap } = require('../data/taskRegistry');
 const { resolveSessionId } = require('../utils/contextResolvers');
 const { matchesSessionFilters, getSessionFilters } = require('../utils/taskFilters');
 const { getDatasetBySessionId } = require('../utils/datasetResolver');
-const { getActingUser, canAccessStudent } = require('../utils/authz');
+const { getActingUser, resolveAuthorizedOwnerId } = require('../utils/authz');
 
 // Resolves the targetUserId query param against actingUser, following the
-// same rule used by GET /api/sessions (Step I.1): omitted => self, present
-// => must pass canAccessStudent. Returns { ownerId } on success, or
-// { error: { status, message } } to short-circuit the route.
-async function resolveOwnerId(actingUser, targetUserId) {
-  if (targetUserId === undefined || targetUserId === null || targetUserId === '') {
-    return { ownerId: actingUser.id };
-  }
-
-  const parsedTargetId = parseInt(targetUserId, 10);
-  if (isNaN(parsedTargetId)) {
-    return { error: { status: 400, message: 'Invalid targetUserId.' } };
-  }
-
-  const allowed = await canAccessStudent(actingUser, parsedTargetId);
-  if (!allowed) {
-    return { error: { status: 403, message: 'You do not have permission to view this user\'s progress.' } };
-  }
-
-  return { ownerId: parsedTargetId };
+// same rule used by GET /api/sessions: omitted => self, present => must pass
+// canAccessStudent. Thin wrapper over the shared helper so both call sites
+// below keep this route's existing "...progress." wording.
+function resolveOwnerId(actingUser, targetUserId) {
+  return resolveAuthorizedOwnerId(actingUser, targetUserId, {
+    forbiddenMessage: 'You do not have permission to view this user\'s progress.',
+  });
 }
 
 const PROJECT_LABELS = {

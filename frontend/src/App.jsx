@@ -255,19 +255,14 @@ export default function App() {
     return { session, filters };
   }
 
-  // Archive is the normal user-facing way to remove a session from the
-  // visible list — it preserves all history and is restorable (see
-  // handleRestoreSession below). Falls back to another session exactly like
-  // the old hard-delete flow did, but correctly guards the viewedUser case
-  // (mirrors handleSessionChange's guard above): while reviewing another
-  // user's sessions, never touch the viewer's own localStorage key or call
-  // the self-only PATCH /:id/open route on the reviewed user's behalf.
-  async function handleArchiveSession() {
-    if (!activeSession || !activeUser) return;
-    const archivedId = activeSession.id;
-    await api.sessions.archive(archivedId);
-
-    const remaining = sessions.filter(s => s.id !== archivedId);
+  // Shared by Archive and Delete below — both remove a session from the
+  // visible list and fall back to another session the same way the old
+  // hard-delete flow did, correctly guarding the viewedUser case (mirrors
+  // handleSessionChange's guard above): while reviewing another user's
+  // sessions, never touch the viewer's own localStorage key or call the
+  // self-only PATCH /:id/open route on the reviewed user's behalf.
+  function removeSessionAndPickNext(removedId) {
+    const remaining = sessions.filter(s => s.id !== removedId);
     setSessions(remaining);
     const nextSession = remaining[0] || null;
 
@@ -284,6 +279,16 @@ export default function App() {
     setCurrentView('progress');
   }
 
+  // Archive is the normal user-facing way to remove a session from the
+  // visible list — it preserves all history and is restorable (see
+  // handleRestoreSession below).
+  async function handleArchiveSession() {
+    if (!activeSession || !activeUser) return;
+    const archivedId = activeSession.id;
+    await api.sessions.archive(archivedId);
+    removeSessionAndPickNext(archivedId);
+  }
+
   // Restoring a session only brings it back into the visible list — it
   // deliberately does NOT make it the active session (avoids silently
   // switching the user's current focus to an old, possibly stale plan). The
@@ -292,6 +297,18 @@ export default function App() {
   async function handleRestoreSession(sessionId) {
     await api.sessions.restore(sessionId);
     await loadSessionsForContext();
+  }
+
+  // Delete is separate from Archive — permanent, destroys task_attempts/
+  // user_task_progress/learning_session_filters server-side (see
+  // DELETE /api/sessions/:id), never restorable. Kept as its own handler
+  // (rather than a parameter on handleArchiveSession) so the two destructive
+  // actions stay clearly distinct at the call-site level, matching the UI.
+  async function handleDeleteSession() {
+    if (!activeSession || !activeUser) return;
+    const deletedId = activeSession.id;
+    await api.sessions.delete(deletedId);
+    removeSessionAndPickNext(deletedId);
   }
 
   // Mirrors backend canReopenSession() (backend/src/utils/authz.js) for UX
@@ -359,6 +376,18 @@ export default function App() {
       handleNavigate('my-students');
     } else if (activeUser?.role === 'admin') {
       handleNavigate('users');
+    }
+  }
+
+  // Admin deleted another user's account from User Management. UserManagementView
+  // already removes the row from its own local list — this only needs to clear
+  // viewedUser if the deleted account was the one currently being reviewed, so
+  // the app doesn't keep pointing "Viewing: X" at an account that no longer
+  // exists. Deliberately stays on the current view (already 'users') rather
+  // than navigating anywhere — clearing viewedUser is itself the safe default.
+  function handleUserDeleted(deletedUserId) {
+    if (viewedUser?.id === deletedUserId) {
+      setViewedUser(null);
     }
   }
 
@@ -469,7 +498,7 @@ export default function App() {
       }
       case 'users':
         return activeUser?.role === 'admin'
-          ? <UserManagementView onReviewUser={handleSelectViewedUser} />
+          ? <UserManagementView activeUser={activeUser} onReviewUser={handleSelectViewedUser} onUserDeleted={handleUserDeleted} />
           : null;
       case 'my-students':
         return activeUser?.role === 'mentor'
@@ -504,6 +533,7 @@ export default function App() {
         onCreateSession={handleCreateSession}
         onArchiveSession={handleArchiveSession}
         onRestoreSession={handleRestoreSession}
+        onDeleteSession={handleDeleteSession}
         onCompleteSession={handleCompleteSession}
         onReopenSession={handleReopenSession}
         canReopenSession={canReopenSession(activeUser)}

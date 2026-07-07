@@ -52,11 +52,11 @@ async function cleanup() {
   await pool.query('DELETE FROM users WHERE username LIKE $1', [`${PREFIX}%`]);
 }
 
-async function createUser(username) {
+async function createUser(username, role = 'student') {
   const hash = await bcrypt.hash(TEST_PASSWORD, 10);
   const r = await pool.query(
     'INSERT INTO users (username, role, password_hash) VALUES ($1, $2, $3) RETURNING id',
-    [username, 'student', hash]
+    [username, role, hash]
   );
   return r.rows[0].id;
 }
@@ -215,6 +215,26 @@ async function run() {
       }
     }
 
+    // ── Case 5b: unauthenticated POST /api/query WITHOUT taskId → 401 ─────────
+    // This is the actual vulnerability: before this fix, omitting taskId let
+    // an anonymous caller execute arbitrary SELECT SQL through the backend
+    // (the free-form playground path recorded nothing, so it skipped the old
+    // `taskId && !actingUser` gate entirely). Login is now required
+    // unconditionally, regardless of taskId.
+    {
+      const res = await fetch(queryBase, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql: 'SELECT 1' }),
+      });
+      const body = await res.json();
+      if (res.status === 401 && body?.error === 'Authentication required') {
+        pass('5b', 'Unauthenticated POST /api/query WITHOUT taskId returns 401 (body: { error: "Authentication required" })');
+      } else {
+        fail('5b', 'Unauthenticated POST /api/query without taskId must return 401', `status=${res.status}, body=${JSON.stringify(body)}`);
+      }
+    }
+
     // ── Case 6: logged-in query attempt writes only for the caller's own session
     {
       const { cookie } = await login(base, userAUsername, TEST_PASSWORD);
@@ -244,6 +264,32 @@ async function run() {
         pass('6', "Query attempt recording works for the caller's own session and never writes to another user's session");
       } else {
         fail('6', 'Query attempt writes must be scoped to the caller\'s own session only', `ownStatus=${ownRes.status}, foreignStatus=${foreignRes.status}, ownRows=${ownAttemptRow.rows.length}, victimAttemptsBefore=${beforeVictimAttempts}, victimAttemptsAfter=${afterVictimAttempts}`);
+      }
+    }
+
+    // ── Cases 7-9: logged-in student/mentor/admin can still use the
+    // free-form Query Playground (no taskId, nothing recorded) exactly as
+    // before — the auth fix must not affect any logged-in role's normal use.
+    {
+      const roleUsers = [
+        { id: '7', role: 'student', username: `${PREFIX}playgroundStudent` },
+        { id: '8', role: 'mentor',  username: `${PREFIX}playgroundMentor` },
+        { id: '9', role: 'admin',   username: `${PREFIX}playgroundAdmin` },
+      ];
+      for (const { id, role, username } of roleUsers) {
+        await createUser(username, role);
+        const { cookie } = await login(base, username, TEST_PASSWORD);
+        const res = await fetch(queryBase, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Cookie: cookie },
+          body: JSON.stringify({ sql: 'SELECT 1 AS n' }),
+        });
+        const body = await res.json();
+        if (res.status === 200 && body?.rows?.[0]?.n !== undefined) {
+          pass(id, `Logged-in ${role} POST /api/query without taskId works as before (200, SELECT-only)`);
+        } else {
+          fail(id, `Logged-in ${role} without taskId must still work`, `status=${res.status}, body=${JSON.stringify(body)}`);
+        }
       }
     }
 

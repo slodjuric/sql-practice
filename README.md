@@ -154,13 +154,30 @@ Tri role: **admin**, **mentor** (u aplikaciji prikazan kao "Professor" — DB vr
 
 | Rola | Šta može |
 |---|---|
-| **Admin** | Upravlja korisnicima (kreira/briše naloge — brisanje trenutno samo preko API-ja, vidi "Poznata ograničenja" ispod), upravlja mentor↔student vezama (ko je čiji mentor), može pregledati sesije/napredak bilo kog korisnika, arhivira/restore-uje/reopenuje bilo čiju sesiju. |
+| **Admin** | Upravlja korisnicima (kreira/briše naloge — vidi "Brisanje korisnika" ispod), upravlja mentor↔student vezama (ko je čiji mentor), može pregledati sesije/napredak bilo kog korisnika, arhivira/restore-uje/reopenuje bilo čiju sesiju. |
 | **Mentor / "Professor"** | Vidi listu sebi dodijeljenih studenata, kreira/edituje/arhivira/restore-uje/reopenuje sesije (planove) za dodijeljene studente, pregleda njihov napredak. Ne može vidjeti/upravljati studentima koji mu nisu dodijeljeni. |
 | **Student** | Rješava zadatke, bira među sebi dodijeljenim sesijama, prati sopstveni napredak. Ne može kreirati/editovati/arhivirati/reopenovati sesiju — jedina "upravljačka" akcija dozvoljena studentu je da svoju sesiju označi kao završenu (complete), pošto pokrene svaki zadatak iz plana bar jednom. |
 
 Dodjeljivanje mentora studentu radi admin, u User Management ekranu ("Assignments" tab).
 
 **Ove role provjere su stvarno enforced na backend-u** (ne samo skrivanje dugmadi u UI-ju) — svaki API poziv koji dira tuđe podatke (druga sesija, drugi korisnikov progress) se nezavisno re-autorizuje na serveru na osnovu ulogovanog korisnika iz sesije, ne na osnovu bilo čega što frontend pošalje.
+
+---
+
+## Brisanje korisnika — samo admin, trajno
+
+U User Management ekranu ("Users" tab), admin sad ima dugme **Delete** za svaki red osim za sopstveni nalog:
+
+- Dugme se **ne prikazuje** za trenutno ulogovanog admina — brisanje sopstvenog naloga i dalje ide preko posebnog "🗑" dugmeta u Sidebar-u (self-delete, postojeći, odvojen flow, sa sopstvenom potvrdom).
+- Klik traži eksplicitnu potvrdu koja objašnjava šta se tačno dešava (ne generičko "Are you sure?"):
+  - Sve sesije, napredak i istorija odgovora koje taj nalog **posjeduje** se **trajno brišu** — nema undo-a.
+  - Sesije koje je taj korisnik samo **kreirao** za nekog drugog (npr. profesor koji je setapovao plan studentu) **ostaju netaknute** — samo prestaju da pokazuju ko ih je kreirao.
+  - Za profesore, dodatna napomena da se i njihova dodjela studenata (assignments) uklanja.
+- Nakon uspješnog brisanja: red nestaje iz tabele, prikazuje se poruka o uspjehu, a ako je taj korisnik trenutno pregledan (viewedUser u review modu), pregled se automatski zatvara.
+- Mentor i student **ne vide** User Management ekran uopšte (ruta postoji samo za `activeUser.role === 'admin'`), i ne mogu obrisati korisnika ni direktnim API pozivom — `DELETE /api/users/:id` je admin-only na backend-u, nezavisno od frontenda.
+- Admin ne može obrisati poslednjeg preostalog admin naloga (backend guard) — ovo sprječava potpuno zaključavanje platforme bez ijednog admina.
+
+Detalji autorizacije, tačno ponašanje cascade-a (šta se briše, šta ostaje) i API oblik: [`CLAUDE.md`](CLAUDE.md#rolepermission-model).
 
 ---
 

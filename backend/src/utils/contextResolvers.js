@@ -31,4 +31,24 @@ async function resolveSessionId(userId, provided) {
   return res.rows[0]?.id ?? null;
 }
 
-module.exports = { resolveSessionId };
+// Shared by POST /api/query and POST /api/tasks/:id/check, which both run a
+// query against a session and must block it identically if the session is
+// completed or archived. Returns null if the session is usable, or
+// { status, message } for the caller to respond with
+// `res.status(status).json({ error: message })` — same status code and
+// wording both routes already used before this was pulled out.
+async function getSessionBlockReason(sessionId) {
+  const sessionRow = await pool.query(
+    'SELECT status, archived_at FROM learning_sessions WHERE id = $1',
+    [sessionId]
+  );
+  if (sessionRow.rows[0]?.status === 'completed') {
+    return { status: 403, message: 'This session is completed. Reopen it to continue.' };
+  }
+  if (sessionRow.rows[0]?.archived_at) {
+    return { status: 403, message: 'This session is archived. Restore it from the sidebar to continue.' };
+  }
+  return null;
+}
+
+module.exports = { resolveSessionId, getSessionBlockReason };

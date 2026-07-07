@@ -174,6 +174,38 @@ async function canArchiveSession(actingUser, session) {
   return false;
 }
 
+/**
+ * Resolves the "owner id" for a request that optionally targets another
+ * user's data via a `targetUserId` query/body param — the "optional
+ * targetUserId -> canAccessStudent -> default self" pattern shared by
+ * GET /api/sessions and GET /api/progress/summary|tasks-status.
+ *
+ * Returns { ownerId } on success, or { error: { status, message } } for the
+ * caller to short-circuit with `res.status(error.status).json({ error:
+ * error.message })` — the exact same status codes (400 for a non-numeric
+ * targetUserId, 403 for an unauthorized one) as each call site already used
+ * individually. `forbiddenMessage` lets each route keep its own wording
+ * (e.g. "...view this user's sessions." vs "...view this user's progress.")
+ * so response bodies are unchanged by adopting this helper.
+ */
+async function resolveAuthorizedOwnerId(actingUser, targetUserId, { forbiddenMessage = 'You do not have permission to view this user\'s data.' } = {}) {
+  if (targetUserId === undefined || targetUserId === null || targetUserId === '') {
+    return { ownerId: actingUser.id };
+  }
+
+  const parsedTargetId = parseInt(targetUserId, 10);
+  if (isNaN(parsedTargetId)) {
+    return { error: { status: 400, message: 'Invalid targetUserId.' } };
+  }
+
+  const allowed = await canAccessStudent(actingUser, parsedTargetId);
+  if (!allowed) {
+    return { error: { status: 403, message: forbiddenMessage } };
+  }
+
+  return { ownerId: parsedTargetId };
+}
+
 module.exports = {
   getActingUser,
   requireRole,
@@ -183,4 +215,5 @@ module.exports = {
   canCreateSessionForUser,
   canViewSession,
   canArchiveSession,
+  resolveAuthorizedOwnerId,
 };

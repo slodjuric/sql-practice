@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { api } from '../api';
+import PasswordField from './shared/PasswordField';
 
 export default function LoginView({ onLogin }) {
   const [username, setUsername] = useState('');
@@ -40,10 +41,9 @@ export default function LoginView({ onLogin }) {
         />
 
         <label className="login-label" htmlFor="login-password">Password</label>
-        <input
+        <PasswordField
           id="login-password"
           className="login-input"
-          type="password"
           value={password}
           onChange={e => setPassword(e.target.value)}
           disabled={submitting}

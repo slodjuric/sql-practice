@@ -79,7 +79,8 @@ curl http://localhost:3001/api/health
 - Cookie: `httpOnly`, `sameSite: 'lax'`, `secure` samo kad je `NODE_ENV=production`, rolling 14 dana.
 - `POST /api/auth/login` — generička poruka greške ("Invalid username or password") bez obzira da li nalog ne postoji, nema password_hash, ili je pogrešna lozinka (sprječava enumeraciju naloga). Na uspjeh: `req.session.regenerate()` PRIJE upisa `userId` (mitigacija session fixation-a).
 - `GET /api/auth/me` — svaki put nanovo čita `role`/`username` iz baze na osnovu `req.session.userId` (ništa se ne kešira u samom session payload-u osim `userId`) — promjena role ili brisanje naloga djeluje odmah na sljedećem requestu.
-- **Nema self-service password reset/change** — jedini način da se postavi/resetuje lozinka postojećem nalogu je CLI: `node scripts/set-user-password.js <username> <newPassword>` (min. 8 karaktera, bcrypt hash, nikad ne printa raw password/hash).
+- **Admin može resetovati lozinku bilo kog korisnika iz UI-ja** — `PATCH /api/users/:id/password` (admin-only, `requireRole('admin')`), inline forma u `UserManagementView.jsx` ("Reset password" dugme po redu, uključujući admin-ov sopstveni red — resetovanje lozinke nije destruktivno kao delete, pa se namjerno ne skriva za sopstveni red). Password pravila (`MIN_PASSWORD_LENGTH = 8`, `BCRYPT_COST = 10`, hash/validate helperi) su centralizovana u `backend/src/utils/passwordPolicy.js`, koriste je i `POST /api/users` i `scripts/set-user-password.js`. Radi identično za legacy naloge sa `password_hash IS NULL` (bezuslovni `UPDATE`, isti obrazac kao CLI skripta) — nakon reseta korisnik se odmah može ulogovati. **Namjerno van scope-a za sada:** self-service change (ulogovani korisnik mijenja SVOJU lozinku), forgot-password/email/token flow, generisanje privremene lozinke, force-change-on-next-login, invalidacija postojećih sesija nakon reseta, audit log admin akcije — sve ostaje CLI-only ili nepostojeće dok se eksplicitno ne zatraži.
+- **CLI i dalje postoji i radi** za slučajeve kad UI nije dostupan (npr. bootstrap prvog admina, direktan DB/server pristup): `node scripts/set-user-password.js <username> <newPassword>` (min. 8 karaktera, bcrypt hash, nikad ne printa raw password/hash).
 - **Bootstrap prvog admin naloga nije skriptovan.** `initDb.js` seeduje samo jedan `'default'` user, role `student` (default), bez password_hash-a. Da bi postojao prvi admin nalog, trenutno je potrebna ručna DB izmjena:
   ```sql
   UPDATE users SET role = 'admin' WHERE username = 'default';
@@ -120,6 +121,17 @@ Logika je centralizovana u `backend/src/utils/authz.js`:
 
 **Nema posebne "assignment" (homework) ili "review mode" tabele.** "Assignments" u imenu funkcionalnosti znači *mentor↔student* vezu (`mentor_assignments` tabela, ko je nečiji mentor), ne dodjelu zadataka. "Review mode" znači da mentor/admin gleda postojeće sesije/progress studenta preko `?targetUserId=` na istim GET rutama koje student koristi za sebe — nema posebne review-status/komentar tabele.
 
+### Brisanje korisnika (`DELETE /api/users/:id`)
+
+Admin-only (`requireRole('admin')`), **permanentno, hard-delete** — nema soft-delete/arhive za naloge (za razliku od sesija, vidi Archive/restore ispod). Poziva se iz dva mjesta u frontendu: `Sidebar.jsx`-ov "delete my account" (self-delete, postojeći flow) i `UserManagementView.jsx`-ov "Delete" u tabeli korisnika (brisanje **drugog** korisnika — dugme se namjerno **ne prikazuje** za red trenutno ulogovanog admina, da se izbjegne dupliranje sa self-delete flow-om).
+
+Šta se tačno dešava (`backend/src/routes/users.js`):
+- **Guard protiv brisanja poslednjeg admina** — ako je meta jedini preostali `admin`, vraća 400, ništa se ne mijenja.
+- Sesije koje obrisani korisnik **posjeduje** (`learning_sessions.user_id`) se **trajno brišu**, zajedno sa svojim `task_attempts` i `user_task_progress` redovima (eksplicitno u ruti, transakciono).
+- Sesije koje je obrisani korisnik samo **kreirao** za nekog drugog (`created_by_user_id`, npr. mentor koji je setapovao plan za studenta) **ostaju netaknute** — samo `created_by_user_id` postaje `NULL` (`ON DELETE SET NULL`, migracija u `initDb.js`). Vlasnik (`user_id`) i njegov progress se nikad ne diraju.
+- `mentor_assignments` redovi (i kao `mentor_id` i kao `student_id`) se čiste automatski na DB nivou (`ON DELETE CASCADE`), bez posebnog koda u ruti.
+- Test pokrivenost: `scripts/check-authz.js` (admin-only gate + owned-session cascade), `scripts/check-session-creator-delete.js` (creator-only slučaj, `created_by_user_id` → NULL), `scripts/check-mentor-assignments-schema.js` case 05 (mentor_assignments cascade).
+
 ## VAŽNA INVARIJANTA — activeUser vs viewedUser
 
 - `activeUser` (frontend `App.jsx` state) = **stvarni ulogovani korisnik**, izvor istine je `GET /api/auth/me` → backend session. Sve Run Query / Check Answer akcije MORAJU ostati skopirane na `activeUser` + `activeSession`.
@@ -152,9 +164,9 @@ Mentor može kreirati/editovati/arhivirati/restore-ovati/reopenovati sesiju za d
 - `POST /api/tasks/:id/check` i `POST /api/query` (Run Query) takođe blokiraju (403) izvršavanje protiv arhivirane sesije, isti obrazac kao postojeći `status === 'completed'` guard.
 - `contextResolvers.resolveSessionId`'s "no sessionId provided → pick user's first session" fallback isključuje arhivirane sesije (`AND archived_at IS NULL`) — arhivirana sesija se nikad ne "vaskrsava" kao aktivna samo zato što caller nije eksplicitno tražio drugu.
 
-### Hard delete — MAINTENANCE-ONLY, nije u frontend UI
+### Hard delete — trajna akcija, dostupna u UI uz Archive
 
-`DELETE /api/sessions/:id` **i dalje postoji u backend-u, nepromijenjene autorizacije** (student nikad; mentor svoju/dodijeljenog studenta; admin bilo koju), ali **više se ne poziva niotkuda iz frontenda** — dugme za brisanje u `Sidebar.jsx` je zamijenjeno Archive dugmetom. Ruta ostaje isključivo za direktan API/admin/DB-maintenance rad (npr. trajno brisanje pogrešno kreiranog test naloga) — permanentno uništava `task_attempts`/`user_task_progress`/`learning_session_filters`/samu sesiju, bez mogućnosti undo-a. Ne koristi ovu rutu kao dio normalnog produkt flow-a niti je vraćaj u UI bez eksplicitnog zahtjeva.
+`DELETE /api/sessions/:id` je trajni hard-delete, nepromijenjene autorizacije (student nikad; mentor svoju/dodijeljenog studenta; admin bilo koju) — permanentno uništava `task_attempts`/`user_task_progress`/`learning_session_filters`/samu sesiju, bez mogućnosti undo-a. Archive i Delete su namjerno dva odvojena dugmeta u `Sidebar.jsx`-ovoj session-controls traci (🗄 Archive, 🗑 Delete), oba vidljiva samo za `activeUser.role !== 'student'` — isti gate kao Archive/Create, student ih nikad ne vidi. Delete NE zamjenjuje Archive: Archive ostaje default, restorabilan, non-destructive način uklanjanja sesije iz vidljive liste (vidi gore); Delete je za slučajeve kad se sesija stvarno treba trajno ukloniti (npr. pogrešno kreiran test plan). Delete-ova potvrda (`window.confirm`) eksplicitno navodi šta se briše i da je nepovratno: `Delete session "<name>" permanently? This will delete its attempts, progress, and plan filters. This cannot be undone.` — namjerno destruktivnija formulacija od Archive-ove potvrde. Nakon uspješnog delete-a, `App.jsx`-ov `handleDeleteSession` (dijeli `removeSessionAndPickNext` helper sa `handleArchiveSession`) uklanja sesiju iz liste i bira sljedeću dostupnu sesiju (ili prazno stanje ako nema više).
 
 ## Dataset/task sistem
 
@@ -209,11 +221,11 @@ Mentor može kreirati/editovati/arhivirati/restore-ovati/reopenovati sesiju za d
 | Mount | Fajl | Rute | Auth |
 |---|---|---|---|
 | `/api/auth` | `routes/auth.js` | `POST /login`, `POST /logout`, `GET /me` | javno (login/logout), `/me` provjerava session |
-| `/api/users` | `routes/users.js` | `GET /`, `POST /`, `DELETE /:id` | admin-only (`requireRole('admin')`) |
-| `/api/sessions` | `routes/sessions.js` | `GET /` (`?includeArchived=true` opciono), `POST /`, `PATCH /:id`, `GET /:id/filters`, `PATCH /:id/complete`, `PATCH /:id/reopen`, `PATCH /:id/open`, `PATCH /:id/archive`, `PATCH /:id/restore`, `DELETE /:id` (**maintenance-only, nije u frontend UI**) | login required; ownership/role provjere po ruti (vidi tabelu gore i "Archive / restore" ispod) |
+| `/api/users` | `routes/users.js` | `GET /`, `POST /`, `DELETE /:id`, `PATCH /:id/password` | admin-only (`requireRole('admin')`) |
+| `/api/sessions` | `routes/sessions.js` | `GET /` (`?includeArchived=true` opciono), `POST /`, `PATCH /:id`, `GET /:id/filters`, `PATCH /:id/complete`, `PATCH /:id/reopen`, `PATCH /:id/open`, `PATCH /:id/archive`, `PATCH /:id/restore`, `DELETE /:id` (trajni hard-delete, dostupan u UI uz Archive — vidi "Hard delete" ispod) | login required; ownership/role provjere po ruti (vidi tabelu gore i "Archive / restore" ispod) |
 | `/api/datasets` | `routes/datasets.js` | `GET /` (lista aktivnih dataset-a) | javno (samo metadata) |
 | `/api/tables` | `routes/tables.js` | `GET /`, `GET /:name/columns`, `GET /:name/preview` | scoped na session-ov dataset schema |
-| `/api/query` | `routes/query.js` | `POST /` (Run Query / playground) | **login required SAMO ako je `taskId` u body-u** — bez `taskId`-ja radi i neulogovano (safety-validator i dalje važi) |
+| `/api/query` | `routes/query.js` | `POST /` (Run Query / playground) | **login required uvijek**, bez obzira na `taskId` — vidi "Poznati rizici" ispod |
 | `/api/tasks` | `routes/tasks.js` | `GET /categories`, `GET /`, `GET /:id`, `GET /:id/solution` (login required), `POST /:id/check` | vidi check-answer flow ispod |
 | `/api/progress` | `routes/progress.js` | `GET /summary`, `GET /tasks-status` | login required; `?targetUserId=` re-autorizovan preko `canAccessStudent` |
 | `/api/mentor-assignments` | `routes/mentorAssignments.js` | `GET /`, `POST /`, `DELETE /:id` | admin-only |
@@ -226,13 +238,13 @@ Mentor može kreirati/editovati/arhivirati/restore-ovati/reopenovati sesiju za d
 | `App.jsx` | Top-level controller — auth state, session state, `viewedUser` (review mode), navigacija. Nema router lib, `currentView` string + switch. Heavy prop drilling (nema Context API u projektu). |
 | `api.js` | fetch wrapperi; `credentials: 'same-origin'`; userId/role se nikad ne šalju eksplicitno osim opcionog `targetUserId`. |
 | `components/LoginView.jsx` | Login forma. |
-| `components/Sidebar.jsx` | Navigacija + session switcher (custom dropdown) + create/archive/complete/reopen session forma + "Show archived sessions" toggle sa Restore dugmetom + DB tree + account (self-delete/logout). Hard delete više nije ovdje — Archive je zamijenio Delete dugme. Veliki, multi-responsibility fajl (~730+ linija) — pažljivo čitaj cijeli fajl prije izmjene. |
+| `components/Sidebar.jsx` | Navigacija + session switcher (custom dropdown) + create/archive/**delete**/complete/reopen session forma + "Show archived sessions" toggle sa Restore dugmetom + DB tree + account (self-delete/logout). Archive (🗄) i Delete (🗑) su odvojena dugmad jedno pored drugog, oba admin/mentor-only — Delete ne zamjenjuje Archive. Veliki, multi-responsibility fajl (~750+ linija) — pažljivo čitaj cijeli fajl prije izmjene. |
 | `components/PracticeView.jsx` | Topic/level/project kartice → task list → `TaskView`. |
 | `components/TaskView.jsx` | Editor (CodeMirror), Run Query / Check Answer, hint/solution, `CheckBanner` (specifična poruka po `failureReason`). |
 | `components/QueryPlayground.jsx` | Slobodan SQL sandbox — dijeli safety/timeout/row-limit logiku sa `/api/tasks/:id/check`, ali odvojena ruta. |
 | `components/DatabaseView.jsx` | Table browser (Data/Columns tabovi). |
 | `components/ProgressView.jsx` | Progress dashboard: summary, by-group breakdown, recent attempts, in-progress taskovi, plan editor. Veliki, multi-responsibility fajl (~825 linija, uključuje inline `EditPlanForm` i `SessionSummaryCard`) — pažljivo čitaj cijeli fajl prije izmjene. |
-| `components/UserManagementView.jsx` | Admin: user CRUD (create/list, **NEMA delete/edit-role/reset-password za postojeće ne-self naloge**) + mentor↔student assignment upravljanje. |
+| `components/UserManagementView.jsx` | Admin: user create/list/**delete**/**reset password** (delete permanentno, dugme skriveno za sopstveni red — self-delete i dalje ide preko `Sidebar.jsx`; reset password NIJE skriven za sopstveni red, inline row-expansion forma, jedna otvorena odjednom) + mentor↔student assignment upravljanje. **Još nema** edit-role za postojeće naloge (van scope-a). |
 | `components/MyStudentsView.jsx` | Mentor: lista sopstvenih dodijeljenih studenata. |
 | `components/MentorOverviewView.jsx` | Admin koji pregleda mentora: prikazuje mentorov student roster umjesto mentorovih (obično irelevantnih) sesija. |
 | `components/ResultTable.jsx`, `SqlEditor.jsx`, `TablePreviewPanel.jsx`, `CheckboxGroup.jsx`, `FormSelect.jsx`, `shared/StatusBadge.jsx` | Manje, reusable komponente. |
@@ -263,8 +275,9 @@ Detaljna dokumentacija: [`docs/check-answer-flow.md`](docs/check-answer-flow.md)
 - **`ProgressView.jsx` i `Sidebar.jsx` su veliki, multi-responsibility fajlovi** (~855 i ~780 linija, oba dalje porasla dodavanjem archive/restore UI-ja) — prije bilo kakve izmjene, pročitaj cijeli fajl, ne pretpostavljaj da je odgovornost jasno odvojena unutar njega.
 - **Nema automatizovanih frontend/e2e testova** (nema Playwright-a, nema unit testova, nema `test` skripte u `frontend/package.json`). `activeUser`/`viewedUser` review-mode granica (vidi invarijantu gore) je trenutno zaštićena SAMO ručnim testiranjem i komentarima u kodu — **ne dodavaj nove role/review featur-e prije nego što postoji bar osnovni frontend test oko ove granice**, jer regresija ovdje nije samo UI bug nego security-adjacent bug.
 - **SQL safety sloj ima poznatu rupu** (`SELECT ... INTO`, vidi Check-answer flow gore) i nema DB-level backup (nema restricted/read-only role). Budi oprezan kad proširuješ query execution putanje (`queryRunner.js`, `query.js`, `tasks.js`) — ne pretpostavljaj da je "samo SELECT" garantovano na nivou baze, garantovano je samo na nivou ovog jednog validatora.
-- `POST /api/query` radi bez ikakve autentikacije kad `taskId` nije poslan — najveća neautentikovana površina u API-ju.
-- User lifecycle UI je nepotpun — admin može kreirati korisnike, ali nema UI za brisanje/edit-role/reset-password postojećeg (ne-self) naloga; jedini "delete" u UI-ju je self-delete u `Sidebar.jsx`.
+- `POST /api/query` zahtijeva login uvijek (401 `{ "error": "Authentication required" }` bez sesije), bez obzira na `taskId` — prethodno je radilo i neulogovano kad `taskId` nije poslan (najveća neautentikovana površina u API-ju), popravljeno. Pokriveno testom `test:query-tasks-authz` (case 5b + cases 7-9 za student/mentor/admin bez `taskId`-ja).
+- User lifecycle UI je i dalje djelimično kompletan — admin sad može kreirati, brisati **i resetovati lozinku** korisnika (`UserManagementView.jsx`, sve admin-only), ali još nema edit-role za postojeće naloge.
+- **Brisanje korisnika je permanentno i hard-delete** — briše sve sesije/task_attempts/user_task_progress koje taj korisnik **posjeduje** (vidi `routes/users.js` `DELETE /:id`). Sesije koje je taj korisnik samo **kreirao** za nekog drugog (mentor za studenta) ostaju netaknute, samo im `created_by_user_id` postaje `NULL` (`ON DELETE SET NULL`, vidi initDb.js). `mentor_assignments` redovi se čiste automatski na DB nivou (`ON DELETE CASCADE` na oba pravca). Nema soft-delete/arhive za naloge — ako se ovo pokaže preriskantnim, razmisliti o `deleted_at` pristupu prije nego što broj korisnika poraste.
 - Cinema/football/nation dataset-i su selektabilni pri kreiranju sesije iako nemaju zadataka (vidi Dataset/task sistem gore) — ne pretpostavljaj da su spremni za produkciju/demo dok se ne doda sadržaj ili se picker ne filtrira.
 
 ## Query safety limits
@@ -300,9 +313,10 @@ npm run test:required-order-by    # ORDER BY enforcement scope
 ```bash
 npm run test:auth                    # login/logout/me
 npm run test:password-hashing        # bcrypt hashing/verifikacija
-npm run test:authz                   # DELETE /api/users/:id authz
+npm run test:authz                   # DELETE /api/users/:id authz + owned-session cascade (task_attempts/user_task_progress/session all removed)
 npm run test:authz-helpers           # canAccessUser/canAccessStudent/canCreateSessionForUser/canViewSession
 npm run test:users-admin-gate        # GET/POST /api/users admin-only gate
+npm run test:user-password-reset     # PATCH /api/users/:id/password authz + behavior + legacy NULL-hash case
 npm run test:users-role              # role assignment/validacija
 npm run test:reopen-authz            # PATCH /:id/reopen admin/mentor/student matrica
 npm run test:session-ownership       # osnovna session CRUD izolacija
@@ -340,7 +354,7 @@ Nema CI konfiguracije u repo-u koja bi ove skripte automatski pokretala — tren
 ## Preporučeni sljedeći zadaci
 
 1. **Popuni empty dataset picker problem** — ili filtriraj cinema/football/nation iz session-creation picker-a dok nemaju zadataka, ili napiši prvi set zadataka za jedan od njih.
-2. **Dovrši user lifecycle UI** — delete/edit-role/reset-password za postojeće (ne-self) naloge u `UserManagementView.jsx` (backend `DELETE /api/users/:id` ruta već postoji i autorizovana je).
+2. **Dovrši user lifecycle UI** — delete i reset password su sad urađeni (`UserManagementView.jsx`, oba admin-only); preostaje još edit-role za postojeće naloge, i eventualno self-service password change (vidi Auth / session model gore za listu namjerno neimplementiranih password-related featura).
 3. **Dodaj frontend review-mode testove** — pokrij `activeUser`/`viewedUser` granicu (vidi invarijantu gore) prije dodavanja novih role/review featura.
 4. **Refaktoriši velike komponente** — izdvoji `EditPlanForm`/`SessionSummaryCard` iz `ProgressView.jsx`, i `SessionSwitcher`/`DbTreeNav`/`AccountPanel` iz `Sidebar.jsx`.
 5. **Konsoliduj dupliranu filter logiku** — jedan izvor istine za `matchesSessionFilters` umjesto dvije ručno sinhronizovane kopije (frontend + backend).

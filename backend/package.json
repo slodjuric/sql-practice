@@ -18,6 +18,7 @@
     "test:password-hashing": "node scripts/check-password-hashing.js",
     "test:auth": "node scripts/check-auth.js",
     "test:users-admin-gate": "node scripts/check-users-admin-gate.js",
+    "test:user-password-reset": "node scripts/check-user-password-reset.js",
     "test:progress-authz": "node scripts/check-progress-authz.js",
     "test:sessions-read-authz": "node scripts/check-sessions-read-authz.js",
     "test:sessions-write-authz": "node scripts/check-sessions-write-authz.js",

@@ -32,6 +32,26 @@ body {
 }
 #root { height: 100vh; }
 
+/* Chrome/Safari/Edge ignore an input's own `background`/`color` once the
+   browser autofills it (saved username/password, etc.) — it paints its own
+   light highlight over the field regardless of the dark theme CSS below,
+   which is exactly what made the login/create-user inputs flash light-blue
+   after autofill. The oversized inset box-shadow is the standard override:
+   `background-color` alone does not work on `:-webkit-autofill`, but a huge
+   inset shadow visually replaces it, and `-webkit-text-fill-color` does the
+   same job `color` normally would. The long `transition` delays Chrome's
+   own re-application of its autofill style long enough that ours wins.  */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active {
+  -webkit-box-shadow: 0 0 0 1000px var(--bg-input) inset !important;
+  box-shadow: 0 0 0 1000px var(--bg-input) inset !important;
+  -webkit-text-fill-color: var(--text-primary) !important;
+  caret-color: var(--text-primary);
+  transition: background-color 9999s ease-in-out 0s, color 9999s ease-in-out 0s;
+}
+
 /* ===== Layout ===== */
 .app {
   display: flex;
@@ -203,6 +223,35 @@ body {
 }
 
 .sidebar-archive-session-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.sidebar-delete-session-btn {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.12s;
+  padding: 0;
+}
+
+.sidebar-delete-session-btn:hover:not(:disabled) {
+  border-color: var(--red);
+  color: var(--red);
+  background: rgba(248, 81, 73, 0.08);
+}
+
+.sidebar-delete-session-btn:disabled {
   opacity: 0.35;
   cursor: not-allowed;
 }
@@ -2877,7 +2926,90 @@ body {
 .user-mgmt-input:focus,
 .user-mgmt-select:focus { border-color: var(--accent); }
 
-.user-mgmt-select { cursor: pointer; }
+/* Password show/hide field — shared by LoginView and UserManagementView's
+   create-user form (components/shared/PasswordField.jsx). A relative-
+   positioned wrapper so the toggle can sit inside the input's own box
+   (right edge) instead of taking up a separate row; the input itself keeps
+   whichever box style class its own view already uses (.login-input or
+   .user-mgmt-input), this only adds the room + position for the icon. */
+.password-field {
+  position: relative;
+}
+
+.password-field input {
+  display: block;
+  width: 100%;
+  padding-right: 34px;
+}
+
+/* .login-input carries its own margin-bottom: 14px (UserManagementView's
+   .user-mgmt-input does not — that form spaces rows via flex `gap` instead,
+   so it needs no equivalent rule here). Left on the input, that margin
+   became part of the wrapper's own box height (not just trailing space),
+   so the toggle's top:50% centered against the taller wrapper instead of
+   the input's real height, pushing the icon visibly below-center. Move the
+   margin to the wrapper, scoped to just this combination. */
+.password-field .login-input {
+  margin-bottom: 0;
+}
+.login-view .password-field {
+  margin-bottom: 14px;
+}
+
+.password-toggle {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+}
+
+.password-toggle:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: rgba(139, 148, 158, 0.14);
+}
+
+.password-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.user-mgmt-select {
+  cursor: pointer;
+  /* Native <select> chrome (the arrow box, and on some platforms a light
+     inset around it) ignores background/color and renders with the OS's
+     light-theme control style regardless of the CSS above — appearance:none
+     strips that chrome so our own dark background/border/text actually show
+     through, and the hand-drawn chevron below replaces the native arrow. */
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  padding-right: 28px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none'%3E%3Cpath d='M1 1L5 5L9 1' stroke='%236e7681' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+
+.user-mgmt-select:hover { border-color: var(--text-muted); }
+
+/* Chrome/Edge/Firefox all allow styling the closed <option> list to some
+   degree (support varies by engine/OS) — set explicitly so the popup leans
+   dark instead of falling back to the system default where it is honored. */
+.user-mgmt-select option {
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
 
 .user-mgmt-error {
   font-size: 12px;
@@ -3038,4 +3170,62 @@ body {
 
 .user-mgmt-view-student-btn:hover {
   background: rgba(88, 166, 255, 0.12);
+}
+
+.user-mgmt-delete-btn {
+  padding: 5px 10px;
+  background: transparent;
+  color: var(--red);
+  border: 1px solid var(--red);
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.user-mgmt-delete-btn:hover:not(:disabled) {
+  background: rgba(248, 81, 73, 0.12);
+}
+
+.user-mgmt-delete-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Yellow — matches the app's existing "meaningful but not destructive"
+   convention (same color Sidebar's Archive button uses), distinct from the
+   accent blue (navigation/review) and red (permanent delete) already used
+   in this row. */
+.user-mgmt-reset-password-btn {
+  padding: 5px 10px;
+  background: transparent;
+  color: var(--yellow);
+  border: 1px solid var(--yellow);
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.user-mgmt-reset-password-btn:hover {
+  background: rgba(210, 153, 34, 0.12);
+}
+
+.user-mgmt-reset-row td {
+  background: var(--bg-panel);
+  padding: 12px !important;
+  border-top: none;
+}
+
+.user-mgmt-reset-form {
+  margin: 0;
+}
+
+.user-mgmt-reset-form-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 2px;
 }

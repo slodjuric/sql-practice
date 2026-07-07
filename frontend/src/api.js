@@ -41,6 +41,8 @@ export const api = {
     create: (username, role, password) =>
       request('/users', { method: 'POST', body: JSON.stringify({ username, role, password }) }),
     delete: (userId) => request(`/users/${userId}`, { method: 'DELETE' }),
+    resetPassword: (userId, newPassword) =>
+      request(`/users/${userId}/password`, { method: 'PATCH', body: JSON.stringify({ newPassword }) }),
   },
 
   // Admin-only (enforced backend-side).

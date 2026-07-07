@@ -1,8 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const pool = require('../db');
 const { tasks } = require('../data/taskRegistry');
-const { resolveSessionId } = require('../utils/contextResolvers');
+const { resolveSessionId, getSessionBlockReason } = require('../utils/contextResolvers');
 const { saveCheckAttempt } = require('../utils/attemptRecorder');
 const { getActingUser } = require('../utils/authz');
 const {
@@ -76,16 +75,8 @@ router.post('/:id/check', async (req, res) => {
   const resolvedSessionId = await resolveSessionId(actingUser.id, sessionId);
 
   if (resolvedSessionId) {
-    const sessionRow = await pool.query(
-      'SELECT status, archived_at FROM learning_sessions WHERE id = $1',
-      [resolvedSessionId]
-    );
-    if (sessionRow.rows[0]?.status === 'completed') {
-      return res.status(403).json({ error: 'This session is completed. Reopen it to continue.' });
-    }
-    if (sessionRow.rows[0]?.archived_at) {
-      return res.status(403).json({ error: 'This session is archived. Restore it from the sidebar to continue.' });
-    }
+    const blockReason = await getSessionBlockReason(resolvedSessionId);
+    if (blockReason) return res.status(blockReason.status).json({ error: blockReason.message });
   }
 
   // Resolve dataset for the session — determines schema and enables dataset validation.

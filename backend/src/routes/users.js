@@ -1,12 +1,9 @@
 const express = require('express');
 const router = express.Router();
-const bcrypt = require('bcryptjs');
 const pool = require('../db');
 const { VALID_ROLES, isValidRole } = require('../utils/roleValidator');
 const { requireRole } = require('../utils/authz');
-
-const MIN_PASSWORD_LENGTH = 8;
-const BCRYPT_COST = 10;
+const { MIN_PASSWORD_LENGTH, validatePasswordLength, hashPassword } = require('../utils/passwordPolicy');
 
 // GET /api/users
 // Admin-only. Acting user is resolved from the authenticated session
@@ -44,12 +41,12 @@ router.post('/', requireRole('admin'), async (req, res) => {
   if (!password || typeof password !== 'string') {
     return res.status(400).json({ error: 'Password is required.' });
   }
-  if (password.length < MIN_PASSWORD_LENGTH) {
+  if (!validatePasswordLength(password)) {
     return res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters.` });
   }
 
   try {
-    const hash = await bcrypt.hash(password, BCRYPT_COST);
+    const hash = await hashPassword(password);
     const result = await pool.query(
       'INSERT INTO users (username, role, password_hash) VALUES ($1, $2, $3) RETURNING id, username, role, created_at',
       [trimmed, resolvedRole, hash]
@@ -109,6 +106,47 @@ router.delete('/:id', requireRole('admin'), async (req, res) => {
     res.status(500).json({ error: err.message });
   } finally {
     client.release();
+  }
+});
+
+// PATCH /api/users/:id/password
+// Admin-only. Resets any user's password, including the admin's own —
+// unlike delete, this isn't destructive (it doesn't remove data or lock the
+// platform out of admin capability), so it deliberately does not exclude the
+// acting admin's own row the way DELETE /:id does.
+// Works identically for a legacy user with a NULL password_hash (no existing
+// hash to compare against, no special-casing needed) — same unconditional
+// UPDATE pattern as scripts/set-user-password.js.
+// Does not invalidate the target user's existing sessions and does not audit
+// this action — both explicitly out of scope for this step (see CLAUDE.md).
+router.patch('/:id/password', requireRole('admin'), async (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+  if (!userId || isNaN(userId)) {
+    return res.status(400).json({ error: 'Invalid user id.' });
+  }
+
+  const { newPassword } = req.body;
+  if (!newPassword || typeof newPassword !== 'string') {
+    return res.status(400).json({ error: 'New password is required.' });
+  }
+  if (!validatePasswordLength(newPassword)) {
+    return res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters.` });
+  }
+
+  try {
+    const check = await pool.query('SELECT id FROM users WHERE id = $1', [userId]);
+    if (check.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+
+    const hash = await hashPassword(newPassword);
+    const result = await pool.query(
+      'UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING id, username, role',
+      [hash, userId]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

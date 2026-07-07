@@ -40,6 +40,21 @@ function fail(id, name, detail) {
 }
 
 async function cleanup() {
+  // task_attempts.user_id and user_task_progress.user_id have no ON DELETE
+  // action of their own (unlike their session_id FKs, which cascade from
+  // learning_sessions) — a leftover row from a failed case (e.g. case g,
+  // which seeds an owned session with attempt/progress rows) would otherwise
+  // make the final `DELETE FROM users` below fail with a FK violation. Clean
+  // child rows first, same order the real DELETE /api/users/:id route uses.
+  await pool.query(`
+    DELETE FROM task_attempts WHERE session_id IN (
+      SELECT id FROM learning_sessions WHERE user_id IN (SELECT id FROM users WHERE username LIKE $1)
+    )`, [`${PREFIX}%`]);
+  await pool.query(`
+    DELETE FROM user_task_progress WHERE session_id IN (
+      SELECT id FROM learning_sessions WHERE user_id IN (SELECT id FROM users WHERE username LIKE $1)
+    )`, [`${PREFIX}%`]);
+  await pool.query(`DELETE FROM learning_sessions WHERE user_id IN (SELECT id FROM users WHERE username LIKE $1)`, [`${PREFIX}%`]);
   await pool.query('DELETE FROM users WHERE username LIKE $1', [`${PREFIX}%`]);
 }
 
@@ -203,6 +218,57 @@ async function run() {
         pass('f', 'password_hash is never present in login or users-list responses');
       } else {
         fail('f', 'password_hash must never be returned', `loginBody=${JSON.stringify(adminLoginBody)}`);
+      }
+    }
+
+    // ── Case g: deleting a user who OWNS a session cascades their own data ────
+    // Every prior case's victim owned no sessions at all, so none of them
+    // actually exercised the cascade the route documents (task_attempts,
+    // user_task_progress, and the session row itself, all scoped to the
+    // deleted user's own id). This is the one case that seeds a real owned
+    // session with attempt/progress rows and confirms all three are gone
+    // afterward, not just the user row.
+    //
+    // Uses a freshly created admin + fresh login rather than the original
+    // adminCookie/adminId — case e2 above unconditionally sends a DELETE for
+    // adminId (only the pass/fail *assertion* is skipped when pre-existing
+    // admins make the last-admin guard untestable), so in any environment
+    // with a real pre-existing admin, adminId no longer exists by this point
+    // and adminCookie's session is already invalid.
+    const admin3Username = `${PREFIX}admin3`;
+    await createUser(admin3Username, 'admin'); // withPassword defaults to true — needed to log in below
+    const { cookie: admin3Cookie } = await login(base, admin3Username, TEST_PASSWORD);
+    {
+      const ownerId = await createUser(`${PREFIX}session_owner`, 'student', false);
+      const dataset = await pool.query("SELECT id FROM datasets WHERE key = 'academic'");
+      const sessionRow = await pool.query(
+        `INSERT INTO learning_sessions (user_id, created_by_user_id, name, dataset_id)
+         VALUES ($1, $1, $2, $3) RETURNING id`,
+        [ownerId, `${PREFIX}owned_session`, dataset.rows[0].id]
+      );
+      const ownedSessionId = sessionRow.rows[0].id;
+      await pool.query(
+        `INSERT INTO task_attempts (user_id, session_id, task_id, submitted_sql, is_correct)
+         VALUES ($1, $2, 1, 'SELECT 1', true)`,
+        [ownerId, ownedSessionId]
+      );
+      await pool.query(
+        `INSERT INTO user_task_progress (user_id, session_id, task_id, status, attempts_count)
+         VALUES ($1, $2, 1, 'solved', 1)`,
+        [ownerId, ownedSessionId]
+      );
+
+      const delRes = await fetch(`${usersBase}/${ownerId}`, { method: 'DELETE', headers: { Cookie: admin3Cookie } });
+      const userGone     = !(await userExists(ownerId));
+      const sessionGone  = (await pool.query('SELECT id FROM learning_sessions WHERE id = $1', [ownedSessionId])).rows.length === 0;
+      const attemptsGone = (await pool.query('SELECT id FROM task_attempts WHERE session_id = $1', [ownedSessionId])).rows.length === 0;
+      const progressGone = (await pool.query('SELECT id FROM user_task_progress WHERE session_id = $1', [ownedSessionId])).rows.length === 0;
+
+      if (delRes.status === 200 && userGone && sessionGone && attemptsGone && progressGone) {
+        pass('g', 'Deleting a user cascades their OWNED session, task_attempts, and user_task_progress (all gone)');
+      } else {
+        fail('g', 'Deleting a user must cascade their owned session/attempts/progress',
+          `delStatus=${delRes.status}, userGone=${userGone}, sessionGone=${sessionGone}, attemptsGone=${attemptsGone}, progressGone=${progressGone}`);
       }
     }
 

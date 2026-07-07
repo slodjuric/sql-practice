@@ -4,7 +4,7 @@ const pool = require('../db');
 const { tasks } = require('../data/taskRegistry');
 const { matchesSessionFilters, getSessionFilters } = require('../utils/taskFilters');
 const { getDatasetByKey, getDatasetBySessionId } = require('../utils/datasetResolver');
-const { getActingUser, canReopenSession, canCreateSessionForUser, canAccessStudent, canArchiveSession } = require('../utils/authz');
+const { getActingUser, canReopenSession, canCreateSessionForUser, canAccessStudent, canArchiveSession, resolveAuthorizedOwnerId } = require('../utils/authz');
 
 async function insertSessionFilters(client, sessionId, { topics = [], difficulties = [], projects = [], categories = [] } = {}) {
   const rows = [
@@ -83,21 +83,11 @@ router.get('/', async (req, res) => {
     return res.status(401).json({ error: 'Not authenticated.' });
   }
 
-  let ownerId = actingUser.id;
   const { targetUserId, includeArchived } = req.query;
-  if (targetUserId !== undefined && targetUserId !== null && targetUserId !== '') {
-    const parsedTargetId = parseInt(targetUserId, 10);
-    if (isNaN(parsedTargetId)) {
-      return res.status(400).json({ error: 'Invalid targetUserId.' });
-    }
-
-    const allowed = await canAccessStudent(actingUser, parsedTargetId);
-    if (!allowed) {
-      return res.status(403).json({ error: 'You do not have permission to view this user\'s sessions.' });
-    }
-
-    ownerId = parsedTargetId;
-  }
+  const { ownerId, error } = await resolveAuthorizedOwnerId(actingUser, targetUserId, {
+    forbiddenMessage: 'You do not have permission to view this user\'s sessions.',
+  });
+  if (error) return res.status(error.status).json({ error: error.message });
 
   const showArchived = includeArchived === 'true' || includeArchived === '1';
 

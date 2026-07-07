@@ -13,11 +13,8 @@
  * success message.
  */
 
-const bcrypt = require('bcryptjs');
 const pool = require('../src/db');
-
-const MIN_PASSWORD_LENGTH = 8;
-const BCRYPT_COST = 10;
+const { MIN_PASSWORD_LENGTH, validatePasswordLength, hashPassword } = require('../src/utils/passwordPolicy');
 
 async function run() {
   const [, , username, password] = process.argv;
@@ -36,7 +33,7 @@ async function run() {
     return;
   }
 
-  if (password.length < MIN_PASSWORD_LENGTH) {
+  if (!validatePasswordLength(password)) {
     console.error(`Error: password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
     process.exitCode = 1;
     return;
@@ -50,7 +47,7 @@ async function run() {
       return;
     }
 
-    const hash = await bcrypt.hash(password, BCRYPT_COST);
+    const hash = await hashPassword(password);
     await pool.query('UPDATE users SET password_hash = $1 WHERE username = $2', [hash, username.trim()]);
 
     console.log(`Password set successfully for user "${username.trim()}".`);

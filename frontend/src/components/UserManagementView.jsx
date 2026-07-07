@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Fragment } from 'react';
 import { api } from '../api';
 import { roleLabel } from '../utils/roleLabels';
+import PasswordField from './shared/PasswordField';
 
 const ROLE_OPTIONS = ['student', 'mentor', 'admin'];
 const MIN_PASSWORD_LENGTH = 8;
@@ -14,8 +15,7 @@ function reviewLabel(role) {
   if (role === 'mentor')  return 'View students';
   return 'View activity';
 }
-
-export default function UserManagementView({ onReviewUser }) {
+export default function UserManagementView({ activeUser, onReviewUser, onUserDeleted }) {
   const [activeTab, setActiveTab] = useState('users');
 
   const [users, setUsers] = useState([]);
@@ -30,6 +30,17 @@ export default function UserManagementView({ onReviewUser }) {
   const [formError, setFormError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [successMessage, setSuccessMessage] = useState(null);
+
+  const [deletingId, setDeletingId] = useState(null);
+  const [deleteError, setDeleteError] = useState(null);
+
+  // Reset-password inline form — keyed by user id so only one row's form is
+  // ever open at a time (opening a new one implicitly replaces any other).
+  const [resettingUserId, setResettingUserId] = useState(null);
+  const [resetNewPassword, setResetNewPassword] = useState('');
+  const [resetConfirmPassword, setResetConfirmPassword] = useState('');
+  const [resetFormError, setResetFormError] = useState(null);
+  const [resetSaving, setResetSaving] = useState(false);
 
   const [assignments, setAssignments] = useState([]);
   const [assignmentsLoading, setAssignmentsLoading] = useState(true);
@@ -119,6 +130,81 @@ export default function UserManagementView({ onReviewUser }) {
       setFormError(err.message);
     } finally {
       setSaving(false);
+    }
+  }
+
+  // Admin-only, permanent. Deleting a user destroys everything THEY own
+  // (their sessions, and each owned session's task_attempts/user_task_progress
+  // — see DELETE /api/users/:id) but never touches another user's data:
+  // sessions this user only *created* for someone else keep existing, just
+  // with created_by_user_id nulled out (ON DELETE SET NULL, see initDb.js),
+  // and any mentor_assignments row is cleaned up automatically at the DB
+  // level. The confirmation below spells this out rather than a vague
+  // "are you sure?", since the two outcomes (owned vs. merely-created data)
+  // are easy to conflate.
+  async function handleDeleteUser(user) {
+    const confirmed = window.confirm(
+      `Permanently delete "${user.username}" (${roleLabel(user.role)})?\n\n` +
+      `This cannot be undone. Any sessions, progress, and answer history OWNED by this account will be permanently deleted.\n\n` +
+      `Sessions this user only created on behalf of someone else will NOT be deleted — they remain with their original owner, just without a listed creator.` +
+      (user.role === 'mentor' ? `\n\nThis professor's student assignments will also be removed.` : '')
+    );
+    if (!confirmed) return;
+
+    setDeleteError(null);
+    setDeletingId(user.id);
+    try {
+      await api.users.delete(user.id);
+      setUsers(prev => prev.filter(u => u.id !== user.id));
+      setSuccessMessage(`User "${user.username}" deleted.`);
+      onUserDeleted?.(user.id);
+    } catch (err) {
+      setDeleteError(err.message);
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
+  function openResetForm(user) {
+    setResettingUserId(user.id);
+    setResetNewPassword('');
+    setResetConfirmPassword('');
+    setResetFormError(null);
+    setSuccessMessage(null);
+  }
+
+  function closeResetForm() {
+    setResettingUserId(null);
+    setResetNewPassword('');
+    setResetConfirmPassword('');
+    setResetFormError(null);
+  }
+
+  async function handleResetPassword(user) {
+    setResetFormError(null);
+
+    if (!resetNewPassword) {
+      setResetFormError('New password is required.');
+      return;
+    }
+    if (resetNewPassword.length < MIN_PASSWORD_LENGTH) {
+      setResetFormError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
+      return;
+    }
+    if (resetNewPassword !== resetConfirmPassword) {
+      setResetFormError('Passwords do not match.');
+      return;
+    }
+
+    setResetSaving(true);
+    try {
+      await api.users.resetPassword(user.id, resetNewPassword);
+      setSuccessMessage(`Password reset for "${user.username}".`);
+      closeResetForm();
+    } catch (err) {
+      setResetFormError(err.message);
+    } finally {
+      setResetSaving(false);
     }
   }
 
@@ -227,9 +313,8 @@ export default function UserManagementView({ onReviewUser }) {
 
               <div className="user-mgmt-form-row">
                 <label className="user-mgmt-label" htmlFor="new-user-password">Password *</label>
-                <input
+                <PasswordField
                   id="new-user-password"
-                  type="password"
                   className="user-mgmt-input"
                   value={password}
                   onChange={e => setPassword(e.target.value)}
@@ -240,9 +325,8 @@ export default function UserManagementView({ onReviewUser }) {
 
               <div className="user-mgmt-form-row">
                 <label className="user-mgmt-label" htmlFor="new-user-confirm-password">Confirm password *</label>
-                <input
+                <PasswordField
                   id="new-user-confirm-password"
-                  type="password"
                   className="user-mgmt-input"
                   value={confirmPassword}
                   onChange={e => setConfirmPassword(e.target.value)}
@@ -264,6 +348,8 @@ export default function UserManagementView({ onReviewUser }) {
             </form>
           )}
 
+          {deleteError && <div className="user-mgmt-error">{deleteError}</div>}
+
           {loading ? (
             <div className="loading">Loading users…</div>
           ) : error ? (
@@ -276,24 +362,108 @@ export default function UserManagementView({ onReviewUser }) {
                   <th>Role</th>
                   <th>Created</th>
                   <th></th>
+                  <th></th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
                 {users.map(u => (
-                  <tr key={u.id}>
-                    <td>{u.username}</td>
-                    <td>{roleLabel(u.role)}</td>
-                    <td>{new Date(u.created_at).toLocaleString()}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className="user-mgmt-review-btn user-mgmt-view-student-btn"
-                        onClick={() => onReviewUser?.(u)}
-                      >
-                        {reviewLabel(u.role)}
-                      </button>
-                    </td>
-                  </tr>
+                  <Fragment key={u.id}>
+                    <tr>
+                      <td>{u.username}</td>
+                      <td>{roleLabel(u.role)}</td>
+                      <td>{new Date(u.created_at).toLocaleString()}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="user-mgmt-review-btn user-mgmt-view-student-btn"
+                          onClick={() => onReviewUser?.(u)}
+                        >
+                          {reviewLabel(u.role)}
+                        </button>
+                      </td>
+                      <td>
+                        {/* Allowed for the admin's own row too, unlike Delete
+                            below — resetting a password isn't destructive
+                            (no data loss, no risk of locking out admin
+                            capability), so there's no need to redirect this
+                            to a separate self-service flow. */}
+                        <button
+                          type="button"
+                          className="user-mgmt-reset-password-btn"
+                          onClick={() => (resettingUserId === u.id ? closeResetForm() : openResetForm(u))}
+                        >
+                          {resettingUserId === u.id ? 'Cancel' : 'Reset password'}
+                        </button>
+                      </td>
+                      <td>
+                        {/* Never shown for the currently logged-in admin's own
+                            row — self-delete already has its own dedicated
+                            flow (Sidebar's "delete my account" button), with
+                            its own confirmation copy. Showing a second delete
+                            path here for the same account would be confusing
+                            and redundant, not safer. */}
+                        {u.id !== activeUser?.id && (
+                          <button
+                            type="button"
+                            className="user-mgmt-delete-btn"
+                            onClick={() => handleDeleteUser(u)}
+                            disabled={deletingId === u.id}
+                          >
+                            {deletingId === u.id ? 'Deleting…' : 'Delete'}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                    {resettingUserId === u.id && (
+                      <tr className="user-mgmt-reset-row">
+                        <td colSpan={6}>
+                          <form
+                            className="user-mgmt-form user-mgmt-reset-form"
+                            onSubmit={e => { e.preventDefault(); handleResetPassword(u); }}
+                          >
+                            <div className="user-mgmt-reset-form-title">Reset password for {u.username}</div>
+
+                            <div className="user-mgmt-form-row">
+                              <label className="user-mgmt-label" htmlFor={`reset-password-${u.id}`}>New password *</label>
+                              <PasswordField
+                                id={`reset-password-${u.id}`}
+                                className="user-mgmt-input"
+                                value={resetNewPassword}
+                                onChange={e => setResetNewPassword(e.target.value)}
+                                disabled={resetSaving}
+                                autoComplete="new-password"
+                                autoFocus
+                              />
+                            </div>
+
+                            <div className="user-mgmt-form-row">
+                              <label className="user-mgmt-label" htmlFor={`reset-confirm-password-${u.id}`}>Confirm password *</label>
+                              <PasswordField
+                                id={`reset-confirm-password-${u.id}`}
+                                className="user-mgmt-input"
+                                value={resetConfirmPassword}
+                                onChange={e => setResetConfirmPassword(e.target.value)}
+                                disabled={resetSaving}
+                                autoComplete="new-password"
+                              />
+                            </div>
+
+                            {resetFormError && <div className="user-mgmt-error">{resetFormError}</div>}
+
+                            <div className="user-mgmt-form-actions">
+                              <button type="submit" className="user-mgmt-save-btn" disabled={resetSaving}>
+                                {resetSaving ? 'Saving…' : 'Save'}
+                              </button>
+                              <button type="button" className="user-mgmt-cancel-btn" onClick={closeResetForm} disabled={resetSaving}>
+                                Cancel
+                              </button>
+                            </div>
+                          </form>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>

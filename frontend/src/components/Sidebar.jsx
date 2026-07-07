@@ -127,6 +127,7 @@ export default function Sidebar({
   onCreateSession,
   onArchiveSession,
   onRestoreSession,
+  onDeleteSession,
   onCompleteSession,
   onReopenSession,
   canReopenSession,
@@ -193,6 +194,11 @@ export default function Sidebar({
   const [sessionSaving, setSessionSaving] = useState(false);
   const [sessionArchiving, setSessionArchiving] = useState(false);
   const [sessionArchiveError, setSessionArchiveError] = useState(null);
+  // Delete is a separate, permanent action from Archive — kept as its own
+  // state pair rather than reusing the archive ones, so an in-flight/failed
+  // delete never gets confused with an in-flight/failed archive.
+  const [sessionDeleting, setSessionDeleting] = useState(false);
+  const [sessionDeleteError, setSessionDeleteError] = useState(null);
   const [sessionActionError, setSessionActionError] = useState(null);
   const [sessionActioning, setSessionActioning] = useState(false);
 
@@ -216,7 +222,7 @@ export default function Sidebar({
   // *different* session) would linger on screen next to an already-valid,
   // already-open session. A genuine error from the action that's currently
   // in flight is set again right after this by its own handler, so it isn't lost.
-  useEffect(() => { setSessionActionError(null); setSessionArchiveError(null); }, [activeSession?.id, viewedUser?.id]);
+  useEffect(() => { setSessionActionError(null); setSessionArchiveError(null); setSessionDeleteError(null); }, [activeSession?.id, viewedUser?.id]);
 
   // A viewed-user context switch should never leave a *previous* reviewed
   // user's archived-session list on screen — collapse the toggle and clear
@@ -396,6 +402,25 @@ export default function Sidebar({
     }
   }
 
+  // Delete is permanent and distinct from Archive — separate confirmation
+  // copy that explicitly names what is destroyed and that it cannot be undone.
+  async function handleDeleteSessionClick() {
+    if (!activeSession) return;
+    const confirmed = window.confirm(
+      `Delete session "${activeSession.name}" permanently? This will delete its attempts, progress, and plan filters. This cannot be undone.`
+    );
+    if (!confirmed) return;
+    setSessionDeleting(true);
+    setSessionDeleteError(null);
+    try {
+      await onDeleteSession();
+    } catch (err) {
+      setSessionDeleteError(err.message);
+    } finally {
+      setSessionDeleting(false);
+    }
+  }
+
   async function handleCompleteClick() {
     if (!window.confirm('Complete this session? It will become read-only. You can reopen it later.')) return;
     setSessionActionError(null);
@@ -517,11 +542,23 @@ export default function Sidebar({
                   disabled={!activeSession || sessionArchiving}
                 >🗄</button>
               )}
+              {activeUser?.role !== 'student' && (
+                <button
+                  className="sidebar-delete-session-btn"
+                  onClick={handleDeleteSessionClick}
+                  title="Delete session"
+                  disabled={!activeSession || sessionDeleting}
+                >🗑</button>
+              )}
             </div>
           </div>
 
           {sessionArchiveError && (
             <div className="sidebar-add-session-error">{sessionArchiveError}</div>
+          )}
+
+          {sessionDeleteError && (
+            <div className="sidebar-add-session-error">{sessionDeleteError}</div>
           )}
   
           {activeSession && !activeSession.archived_at && (

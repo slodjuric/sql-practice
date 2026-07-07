@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const pool = require('../db');
-const { resolveSessionId } = require('../utils/contextResolvers');
+const { resolveSessionId, getSessionBlockReason } = require('../utils/contextResolvers');
 const { saveRunAttempt } = require('../utils/attemptRecorder');
 const { validateSqlSafety, validateSchemaScope } = require('../utils/sqlSafetyValidator');
 const { executeUserQuery, ROW_LIMIT, QUERY_TIMEOUT } = require('../utils/queryRunner');
@@ -10,8 +9,10 @@ const { getActingUser } = require('../utils/authz');
 
 // POST /api/query — run a SELECT query
 // userId always comes from the authenticated session — never from the client.
-// Only the attempt-recording path (taskId present) requires login; the
-// free-form playground (no taskId, nothing recorded) does not.
+// Requires login unconditionally, regardless of whether taskId is present —
+// this is the only endpoint in the API that can execute arbitrary SQL, so it
+// must never be reachable anonymously, even for the free-form playground
+// where no attempt is recorded.
 router.post('/', async (req, res) => {
   const { sql, taskId, sessionId } = req.body;
 
@@ -20,29 +21,21 @@ router.post('/', async (req, res) => {
   }
 
   const actingUser = await getActingUser(req);
-  if (taskId && !actingUser) {
-    return res.status(401).json({ error: 'Not authenticated.' });
+  if (!actingUser) {
+    return res.status(401).json({ error: 'Authentication required' });
   }
 
   // resolveSessionId verifies the provided sessionId actually belongs to
   // actingUser (or picks their first session if none was provided).
-  const resolvedUserId    = actingUser?.id ?? null;
-  const resolvedSessionId = actingUser ? await resolveSessionId(actingUser.id, sessionId) : null;
+  const resolvedUserId    = actingUser.id;
+  const resolvedSessionId = await resolveSessionId(actingUser.id, sessionId);
 
   // Completed/archived-session guards apply only to task runs (Run Query
   // button on a task), not to the free-form playground where no attempts are
   // recorded.
   if (taskId && resolvedSessionId) {
-    const sessionRow = await pool.query(
-      'SELECT status, archived_at FROM learning_sessions WHERE id = $1',
-      [resolvedSessionId]
-    );
-    if (sessionRow.rows[0]?.status === 'completed') {
-      return res.status(403).json({ error: 'This session is completed. Reopen it to continue.' });
-    }
-    if (sessionRow.rows[0]?.archived_at) {
-      return res.status(403).json({ error: 'This session is archived. Restore it from the sidebar to continue.' });
-    }
+    const blockReason = await getSessionBlockReason(resolvedSessionId);
+    if (blockReason) return res.status(blockReason.status).json({ error: blockReason.message });
   }
 
   const schemaName = await getSchemaNameBySessionId(resolvedSessionId);
