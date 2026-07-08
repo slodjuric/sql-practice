@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, Fragment } from 'react';
 import { api } from '../api';
 
 export default function DatabaseView({ selectedTable, activeSession }) {
@@ -32,7 +32,7 @@ export default function DatabaseView({ selectedTable, activeSession }) {
     return (
       <div className="empty-state" style={{ paddingTop: 80 }}>
         <div className="icon">🗄️</div>
-        <p>Klikni na tabelu u sidebar-u da vidiš podatke</p>
+        <p>Click a table in the sidebar to view its data</p>
       </div>
     );
   }
@@ -128,13 +128,13 @@ function ColumnsTab({ columns }) {
         <div className="col-header">Type</div>
         <div className="col-header">Nullable</div>
         {columns.map(col => (
-          <>
-            <div className="col-cell" key={`n-${col.column_name}`}>{col.column_name}</div>
-            <div className="col-cell type" key={`t-${col.column_name}`}>{col.data_type}</div>
-            <div className="col-cell nullable" key={`nul-${col.column_name}`}>
+          <Fragment key={col.column_name}>
+            <div className="col-cell">{col.column_name}</div>
+            <div className="col-cell type">{col.data_type}</div>
+            <div className="col-cell nullable">
               {col.is_nullable === 'YES' ? 'YES' : 'NO'}
             </div>
-          </>
+          </Fragment>
         ))}
       </div>
     </div>

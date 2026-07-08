@@ -20,6 +20,7 @@ export default function TablePreviewPanel({
   onTabClose,
   onToggleVisibility,
   onCacheUpdate,
+  sessionId,
 }) {
   useEffect(() => {
     if (!activeTab) return;
@@ -28,12 +29,12 @@ export default function TablePreviewPanel({
     onCacheUpdate(activeTab, { loading: true });
 
     let cancelled = false;
-    api.tables.preview(activeTab)
+    api.tables.preview(activeTab, sessionId)
       .then(data => { if (!cancelled) onCacheUpdate(activeTab, data); })
       .catch(err => { if (!cancelled) onCacheUpdate(activeTab, { error: err.message }); });
 
     return () => { cancelled = true; };
-  }, [activeTab]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeTab, sessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const rowCountLabel = previewVisible && activeTab
     ? getRowCountLabel(tableCache[activeTab])

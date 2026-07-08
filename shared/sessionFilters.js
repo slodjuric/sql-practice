@@ -1,23 +1,21 @@
 /**
- * Mirrors shared/sessionFilters.js (repo root), which backend/src/utils/
- * taskFilters.js imports directly via Node's require().
+ * Canonical implementation of "is this task in scope for this session's
+ * plan" — imported directly by backend/src/utils/taskFilters.js via Node's
+ * CommonJS require().
  *
- * This file can't just `import` that same file the way the backend
- * `require()`s it: shared/sessionFilters.js is plain CommonJS (so backend
- * gets it with zero build step), and Vite's dev server only converts
- * CommonJS to ESM for node_modules dependencies (via its optimizeDeps
- * pre-bundling) — it never does that conversion for a project's own source
- * files, including ones outside frontend/ like shared/. Importing it
- * directly loads fine in a production `vite build` (Rollup's commonjs
- * plugin can be pointed at it), but 404s into a runtime "does not provide an
- * export" error under the dev server, which is what actually matters day to
- * day — so that path was reverted in favor of this explicit mirror.
+ * frontend/src/utils/taskFilters.js keeps its own copy of this same function
+ * rather than importing this file: Vite's dev server only converts CommonJS
+ * to ESM for node_modules dependencies (via optimizeDeps pre-bundling), never
+ * for a project's own source files — so a direct import here loads fine in a
+ * production `vite build` but breaks the dev server with a runtime "does not
+ * provide an export" error (full page blank, nothing else on screen).
+ * Rather than a bundler-specific workaround, the frontend keeps a plain
+ * mirror, and backend/scripts/check-session-filters.js's Part B compares its
+ * source text against this file's at test time so the two can't silently
+ * drift apart again — see that file's comments for what it checks.
  *
- * The risk this creates (this copy silently drifting from the canonical one)
- * is exactly what backend/scripts/check-session-filters.js's Part B guards
- * against: it compares this function's source text against
- * shared/sessionFilters.js's at test time and fails loudly on any mismatch.
- * Run `npm run test:session-filters` (backend) after touching either copy.
+ * Dependency-free on purpose: no React, no Express/Node built-ins, no DB
+ * access — plain data in, boolean out.
  *
  * Logic:
  *  1. Difficulty is an AND gate — if the plan specifies levels, the task must
@@ -26,7 +24,7 @@
  *     to at least one of the selected scopes. If no scope filters exist, the
  *     difficulty gate alone determines the result.
  */
-export function matchesSessionFilters(task, filters) {
+function matchesSessionFilters(task, filters) {
   const selectedLevels     = filters?.difficulties ?? [];
   const selectedTopics     = filters?.topics       ?? [];
   const selectedProjects   = filters?.projects     ?? [];
@@ -62,3 +60,5 @@ export function matchesSessionFilters(task, filters) {
 
   return topicOk || projectOk || categoryOk;
 }
+
+module.exports = { matchesSessionFilters };

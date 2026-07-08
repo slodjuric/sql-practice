@@ -37,7 +37,7 @@ export function getFriendlySqlErrorMessage(errorMessage, sql, context = 'practic
   }
 
   // Relation / column not found
-  if (lmsg.includes('does not exist') || lmsg.includes('column') && lmsg.includes('does not exist')) {
+  if (lmsg.includes('does not exist')) {
     return `${msg}\n\nTip: check the table and column names in the task description.`;
   }
 

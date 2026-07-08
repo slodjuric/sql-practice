@@ -2414,8 +2414,9 @@ input:-webkit-autofill:active {
   transition: border-color 0.12s;
 }
 
-.fs-trigger:hover { border-color: var(--text-muted); }
+.fs-trigger:hover:not(:disabled) { border-color: var(--text-muted); }
 .fs-trigger--open { border-color: var(--accent); }
+.fs-trigger:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .fs-label {
   flex: 1;
@@ -2424,6 +2425,8 @@ input:-webkit-autofill:active {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.fs-label--placeholder { color: var(--text-muted); }
 
 .fs-chevron {
   font-size: 9px;
@@ -2471,6 +2474,13 @@ input:-webkit-autofill:active {
   font-weight: 700;
   color: var(--accent);
   flex-shrink: 0;
+}
+
+.fs-empty {
+  display: block;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .create-plan-textarea {
@@ -2856,6 +2866,20 @@ input:-webkit-autofill:active {
 
 /* ── User Management (admin) ─────────────────────────────────────────── */
 
+/* Summary dashboard cards — reuses .progress-stat-card/-value/-label (see
+   Progress View section) for visual consistency instead of a new card style;
+   only the grid layout here is specific to this view's 8-card row. */
+.admin-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.admin-summary-card .progress-stat-value {
+  font-size: 22px;
+}
+
 .user-mgmt-toolbar {
   display: flex;
   justify-content: flex-end;
@@ -3094,9 +3118,12 @@ input:-webkit-autofill:active {
   padding: 8px 12px;
   border-radius: var(--radius);
   font-size: 12px;
+  line-height: 1.4;
   color: var(--text-muted);
   background: var(--bg-panel);
   border: 1px solid var(--border);
+  max-width: 100%;
+  overflow-wrap: break-word;
 }
 
 .user-mgmt-assign-form {
@@ -3213,13 +3240,105 @@ input:-webkit-autofill:active {
   background: rgba(210, 153, 34, 0.12);
 }
 
+/* Purple — a fourth, distinct color for this row's four actions: accent blue
+   (review/navigation), purple (edit role), yellow (reset password, "meaningful
+   but not destructive"), red (permanent delete). */
+.user-mgmt-edit-role-btn {
+  padding: 5px 10px;
+  background: transparent;
+  color: var(--purple);
+  border: 1px solid var(--purple);
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.user-mgmt-edit-role-btn:hover {
+  background: rgba(188, 140, 255, 0.12);
+}
+
+/* Green — My Students' "Create session" quick action, a creation action
+   (matches the semantic used for the green session-status-badge--active
+   below), distinct from the blue "View progress" navigation button and the
+   neutral "View sessions" toggle next to it. */
+.user-mgmt-create-session-btn {
+  padding: 5px 10px;
+  background: transparent;
+  color: var(--green);
+  border: 1px solid var(--green);
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.user-mgmt-create-session-btn:hover {
+  background: rgba(63, 185, 80, 0.12);
+}
+
+/* Neutral grey — My Students' "View sessions" expand/collapse toggle. Not a
+   navigation, creation, or destructive action, just an inline disclosure, so
+   it deliberately doesn't reuse one of the row's other accent colors. */
+.user-mgmt-view-sessions-btn {
+  padding: 5px 10px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+
+.user-mgmt-view-sessions-btn:hover {
+  background: rgba(139, 148, 158, 0.1);
+  border-color: var(--text-muted);
+}
+
+/* Horizontal scroll container for wide tables (My Students' summary table —
+   10 columns including 3 action buttons — and its nested session-history
+   table) so an overflow scrolls just the table, never the whole page. Same
+   purpose as .result-table-wrapper elsewhere, without that class's
+   max-height clamp (this list should show fully, not scroll vertically
+   inside a short box). */
+.user-mgmt-table-scroll {
+  overflow-x: auto;
+}
+
+/* Compact sessions table nested inside My Students' expandable row — reuses
+   .result-table's base styling, just tighter padding to read as a
+   sub-table rather than a peer of the outer Students table. */
+.student-sessions-table {
+  font-size: 12.5px;
+}
+
+.student-sessions-table th,
+.student-sessions-table td {
+  padding: 6px 10px;
+}
+
+.session-status-badge--archived {
+  background: rgba(110, 118, 129, 0.15);
+  color: var(--text-muted);
+}
+
 .user-mgmt-reset-row td {
   background: var(--bg-panel);
   padding: 12px !important;
   border-top: none;
+  /* .result-table td sets white-space: nowrap for normal (single-line) data
+     cells — this row-expansion cell holds a full inline form with prose
+     hint/warning text instead, which must wrap normally or it overflows
+     the form's fixed max-width. */
+  white-space: normal;
 }
 
-.user-mgmt-reset-form {
+.user-mgmt-reset-form,
+.user-mgmt-role-edit-form {
   margin: 0;
 }
 

@@ -1,59 +1,16 @@
 const pool = require('../db');
-
-/**
- * Determines whether a task is in scope for a given session plan.
- *
- * ⚠️  INTENTIONAL DUPLICATION — KEEP IN SYNC
- * This function is mirrored in:
- *   frontend/src/utils/taskFilters.js → matchesSessionFilters (exported)
- *
- * Both implementations MUST stay identical in logic. If you change the filter
- * rules here, apply the same change in taskFilters.js, and vice versa.
- * A mismatch causes users to see different task sets in Practice vs Progress
- * for the same session.
- *
- * Fields that must match between both implementations:
- *   - difficulties  → AND gate: task.difficulty or task.levelId must be included
- *   - topics        → OR scope: task.topicId or task.category must be included
- *   - projects      → OR scope: task.projectId or task.project must be included
- *   - categories    → OR scope: task.category or task.topicId must be included
- *   - hasScopeFilter guard (topics.len > 0 || projects.len > 0 || categories.len > 0)
- *   - gate structure: difficulty is AND, scope filters are OR across types
- */
-function matchesSessionFilters(task, filters) {
-  const selectedLevels     = filters?.difficulties ?? [];
-  const selectedTopics     = filters?.topics       ?? [];
-  const selectedProjects   = filters?.projects     ?? [];
-  const selectedCategories = filters?.categories   ?? [];
-
-  const levelOk =
-    selectedLevels.length === 0 ||
-    selectedLevels.includes(task.difficulty) ||
-    selectedLevels.includes(task.levelId);
-
-  if (!levelOk) return false;
-
-  const hasScopeFilter =
-    selectedTopics.length     > 0 ||
-    selectedProjects.length   > 0 ||
-    selectedCategories.length > 0;
-
-  if (!hasScopeFilter) return true;
-
-  const topicOk =
-    selectedTopics.includes(task.topicId) ||
-    selectedTopics.includes(task.category);
-
-  const projectOk =
-    selectedProjects.includes(task.projectId) ||
-    selectedProjects.includes(task.project);
-
-  const categoryOk =
-    selectedCategories.includes(task.category) ||
-    selectedCategories.includes(task.topicId);
-
-  return topicOk || projectOk || categoryOk;
-}
+// matchesSessionFilters used to be hand-duplicated here and in
+// frontend/src/utils/taskFilters.js — both copies had to be kept in sync
+// manually, with a real risk of Practice and Progress silently disagreeing
+// about a session's task scope if one side was edited without the other.
+// This backend copy is now just a re-export of the canonical implementation
+// in shared/sessionFilters.js (repo root), loaded via plain Node require() —
+// no build step needed on this side. The frontend copy could not be
+// collapsed the same way (see shared/sessionFilters.js's docstring for why —
+// short version: Vite's dev server can't interop a plain CommonJS project
+// file), so it keeps its own copy, checked for drift by
+// scripts/check-session-filters.js instead of removed.
+const { matchesSessionFilters } = require('../../../shared/sessionFilters');
 
 async function getSessionFilters(sessionId) {
   const [filtersRes, sessionRes] = await Promise.all([

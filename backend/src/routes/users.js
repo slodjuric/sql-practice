@@ -19,6 +19,37 @@ router.get('/', requireRole('admin'), async (req, res) => {
   }
 });
 
+// GET /api/users/admin-summary
+// Admin-only. Aggregated counts for a simple dashboard overview — total
+// users, per-role breakdown, session lifecycle counts, and assignment
+// count. No raw per-user/per-session rows, only totals, so this stays cheap
+// and doesn't leak anything GET /api/users or /api/sessions wouldn't already
+// allow an admin to compute themselves.
+// Session counts are mutually exclusive and sum to the total session count:
+// active/completed both exclude archived sessions (archived is a separate,
+// orthogonal lifecycle flag — see CLAUDE.md's sessions/plans model), and
+// archived counts regardless of its underlying status.
+// Registered before the /:id routes below only for readability — there is
+// no GET /:id route on this router, so there's no actual path collision risk.
+router.get('/admin-summary', requireRole('admin'), async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        (SELECT COUNT(*)::int FROM users) AS total_users,
+        (SELECT COUNT(*)::int FROM users WHERE role = 'admin') AS admins,
+        (SELECT COUNT(*)::int FROM users WHERE role = 'mentor') AS mentors,
+        (SELECT COUNT(*)::int FROM users WHERE role = 'student') AS students,
+        (SELECT COUNT(*)::int FROM learning_sessions WHERE status = 'active' AND archived_at IS NULL) AS active_sessions,
+        (SELECT COUNT(*)::int FROM learning_sessions WHERE status = 'completed' AND archived_at IS NULL) AS completed_sessions,
+        (SELECT COUNT(*)::int FROM learning_sessions WHERE archived_at IS NOT NULL) AS archived_sessions,
+        (SELECT COUNT(*)::int FROM mentor_assignments) AS mentor_assignments
+    `);
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/users
 // Admin-only — account creation is an admin action, not public registration.
 // Creates a login-ready user: a password is required and hashed here so the
@@ -117,8 +148,22 @@ router.delete('/:id', requireRole('admin'), async (req, res) => {
 // Works identically for a legacy user with a NULL password_hash (no existing
 // hash to compare against, no special-casing needed) — same unconditional
 // UPDATE pattern as scripts/set-user-password.js.
-// Does not invalidate the target user's existing sessions and does not audit
-// this action — both explicitly out of scope for this step (see CLAUDE.md).
+//
+// Invalidates every active session belonging to the TARGET user as part of
+// the same transaction as the password update — a stale, already-logged-in
+// browser must not keep working under the old password once it's been
+// reset. Sessions are express-session rows stored by connect-pg-simple in
+// the "session" table (see src/index.js), whose `sess` JSON column carries
+// the `userId` set at login (routes/auth.js's `req.session.userId = user.id`).
+// There's no per-user index on that JSON field — acceptable at this scale;
+// revisit if the session table grows large enough for this DELETE to matter
+// for latency.
+// If the admin is resetting their OWN password, this also deletes their own
+// current session row — intentional (see CLAUDE.md): a self-reset should
+// force the admin to log in again too, not just every other target.
+// Wrapped in a single transaction: if the session cleanup fails for any
+// reason, the password change is rolled back too, so a reset can never
+// "succeed" while leaving the old session usable.
 router.patch('/:id/password', requireRole('admin'), async (req, res) => {
   const userId = parseInt(req.params.id, 10);
   if (!userId || isNaN(userId)) {
@@ -133,20 +178,114 @@ router.patch('/:id/password', requireRole('admin'), async (req, res) => {
     return res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters.` });
   }
 
+  const client = await pool.connect();
   try {
-    const check = await pool.query('SELECT id FROM users WHERE id = $1', [userId]);
+    await client.query('BEGIN');
+
+    const check = await client.query('SELECT id FROM users WHERE id = $1', [userId]);
     if (check.rows.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'User not found.' });
     }
 
     const hash = await hashPassword(newPassword);
-    const result = await pool.query(
+    const result = await client.query(
       'UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING id, username, role',
       [hash, userId]
     );
+
+    await client.query(
+      `DELETE FROM "session" WHERE (sess->>'userId')::int = $1`,
+      [userId]
+    );
+
+    await client.query('COMMIT');
     res.json(result.rows[0]);
   } catch (err) {
+    await client.query('ROLLBACK');
     res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// PATCH /api/users/:id/role
+// Admin-only. Changes an existing user's role in place, so a role correction
+// no longer requires deleting and recreating the account.
+//
+// Role is never cached in the session payload — getActingUser() and
+// GET /api/auth/me both re-read `role` fresh from the DB on every request
+// (see utils/authz.js) — so a role change takes effect immediately on the
+// target's very next request. Unlike password reset, this needs no session
+// invalidation of its own.
+//
+// Guards, in order: new role must be valid; target must exist; demoting the
+// last remaining admin away from 'admin' is blocked, same rule/wording as
+// DELETE /:id's last-admin guard (self-demotion included — an admin who is
+// the last one cannot demote themselves either, for the same reason they
+// can't delete themselves as the last admin).
+//
+// On an actual change away from mentor/student, stale mentor_assignments
+// rows are cleaned up in the same transaction so assignment data never
+// points at a user who no longer holds the matching role:
+//   - leaving 'mentor'  -> delete rows where this user was the mentor_id
+//   - leaving 'student' -> delete rows where this user was the student_id
+// No cleanup is needed when a user newly ENTERS mentor/student (e.g. from
+// admin) — POST /api/mentor-assignments only ever creates a row for a user
+// already holding the matching role, so no stale row can exist for a role
+// the user is only now acquiring.
+router.patch('/:id/role', requireRole('admin'), async (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+  if (!userId || isNaN(userId)) {
+    return res.status(400).json({ error: 'Invalid user id.' });
+  }
+
+  const { role } = req.body;
+  if (!role || !isValidRole(role)) {
+    return res.status(400).json({ error: `Invalid role. Must be one of: ${VALID_ROLES.join(', ')}.` });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const check = await client.query('SELECT id, role FROM users WHERE id = $1', [userId]);
+    if (check.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'User not found.' });
+    }
+    const currentRole = check.rows[0].role;
+
+    if (currentRole === 'admin' && role !== 'admin') {
+      const adminCount = await client.query("SELECT COUNT(*)::int AS n FROM users WHERE role = 'admin'");
+      if (adminCount.rows[0].n <= 1) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Cannot change the role of the last remaining admin.' });
+      }
+    }
+
+    const result = await client.query(
+      'UPDATE users SET role = $1 WHERE id = $2 RETURNING id, username, role',
+      [role, userId]
+    );
+
+    let removedAssignments = 0;
+    if (currentRole === 'mentor' && role !== 'mentor') {
+      const r = await client.query('DELETE FROM mentor_assignments WHERE mentor_id = $1', [userId]);
+      removedAssignments += r.rowCount;
+    }
+    if (currentRole === 'student' && role !== 'student') {
+      const r = await client.query('DELETE FROM mentor_assignments WHERE student_id = $1', [userId]);
+      removedAssignments += r.rowCount;
+    }
+
+    await client.query('COMMIT');
+    res.json({ ...result.rows[0], removedAssignments });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 

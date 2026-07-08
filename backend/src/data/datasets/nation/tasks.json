@@ -1,1 +1,17 @@
-[]
+[
+  {
+    "id": 3000,
+    "datasetKey": "nation",
+    "category": "SELECT basics",
+    "topicId": "select",
+    "levelId": "introduction",
+    "title": "Select all continents",
+    "description": "Show all columns and all rows from the continents table.",
+    "tables": [
+      "continents"
+    ],
+    "difficulty": "easy",
+    "hint": "Use SELECT * and FROM continents.",
+    "solution": "SELECT *\nFROM continents;"
+  }
+]

@@ -142,6 +142,12 @@ export default function Sidebar({
   const [tablesLoading, setTablesLoading] = useState(false);
   const [tablesError, setTablesError] = useState(null);
 
+  // Shared request counter for the DB tree's table list — guards both fetch
+  // sites below (session-change effect and toggleDb) against out-of-order
+  // responses, e.g. two rapid session switches where the first (now stale)
+  // request resolves after the second (current) one.
+  const tablesRequestIdRef = useRef(0);
+
   // ── Resizable sidebar width ───────────────────────────────────
   const sidebarRef = useRef(null);
   const resizingRef = useRef(false);
@@ -287,12 +293,13 @@ export default function Sidebar({
   useEffect(() => {
     setTables([]);
     setTablesError(null);
+    const requestId = ++tablesRequestIdRef.current;
     if (dbOpen) {
       setTablesLoading(true);
       api.tables.list(activeSession?.id)
-        .then(setTables)
-        .catch(() => setTablesError('Could not load tables'))
-        .finally(() => setTablesLoading(false));
+        .then(data => { if (tablesRequestIdRef.current === requestId) setTables(data); })
+        .catch(() => { if (tablesRequestIdRef.current === requestId) setTablesError('Could not load tables'); })
+        .finally(() => { if (tablesRequestIdRef.current === requestId) setTablesLoading(false); });
     }
   }, [activeSession?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -308,10 +315,11 @@ export default function Sidebar({
     if (opening && tables.length === 0 && !tablesError) {
       setTablesLoading(true);
       setTablesError(null);
+      const requestId = ++tablesRequestIdRef.current;
       api.tables.list(activeSession?.id)
-        .then(setTables)
-        .catch(() => setTablesError('Could not load tables'))
-        .finally(() => setTablesLoading(false));
+        .then(data => { if (tablesRequestIdRef.current === requestId) setTables(data); })
+        .catch(() => { if (tablesRequestIdRef.current === requestId) setTablesError('Could not load tables'); })
+        .finally(() => { if (tablesRequestIdRef.current === requestId) setTablesLoading(false); });
     }
   }
 

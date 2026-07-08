@@ -479,7 +479,7 @@ export default function PracticeView({
     <div>
       <div className="page-header">
         <h2>Practice</h2>
-        <p>Izaberi način vežbanja SQL-a.</p>
+        <p>Choose how you'd like to practice SQL.</p>
       </div>
       <div className="page-body">
         <div className="card-grid">

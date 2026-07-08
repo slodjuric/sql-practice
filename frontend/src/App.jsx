@@ -62,6 +62,14 @@ export default function App() {
   // to activeUser regardless of viewedUser — see canViewOthers() above.
   const [viewedUser, setViewedUser] = useState(null);
 
+  // Set by handleOpenStudentSession (My Students' "View sessions" panel) to
+  // pin a SPECIFIC session as the one loadSessionsForContext should select,
+  // overriding its normal "most recently opened" heuristic — a mentor
+  // picking an exact session from a student's history should land on that
+  // session, not whichever one the student last touched. Consumed (cleared)
+  // the next time loadSessionsForContext runs while viewing that user.
+  const [pendingOpenSessionId, setPendingOpenSessionId] = useState(null);
+
   // Only students are structurally barred from ever having a viewed user
   // (there is no UI path for them to set one, but this guards against a
   // stale value surviving a role change without a full reload).
@@ -112,6 +120,20 @@ export default function App() {
         setSessions(list);
 
         if (targetUserId) {
+          // A specific session was requested (My Students' "View sessions"
+          // panel, via handleOpenStudentSession) — honor it instead of the
+          // "most recently opened" heuristic below, then clear it so it
+          // doesn't stick across an unrelated later reload of this same
+          // viewed user's sessions.
+          if (pendingOpenSessionId) {
+            const pending = list.find(s => s.id === pendingOpenSessionId);
+            setPendingOpenSessionId(null);
+            if (pending) {
+              setActiveSession(pending);
+              return;
+            }
+          }
+
           // Viewing another user's sessions for display only — do not call
           // api.sessions.open (that PATCH route is unchanged this step and
           // scoped to the acting user's own sessions), and don't persist to
@@ -379,6 +401,38 @@ export default function App() {
     }
   }
 
+  // "Create session for this student" quick action (My Students overview) —
+  // the whole point is skipping the "view student, then find the sidebar's
+  // + button" two-step flow: this sets the review context AND opens the
+  // sidebar's existing create-session form in one click. Sidebar already
+  // shows "Creating session for: <username>" whenever viewedUser is set
+  // while that form is open, and handleCreateSession already targets
+  // viewedUser when present — both unchanged, this just triggers them together.
+  // Deliberately calls setCurrentView directly, not handleNavigate('progress')
+  // — handleNavigate has no special-case for 'progress' clearing viewedUser,
+  // so this is equivalent, but going through the raw setter here keeps this
+  // function's intent (view student's context, don't touch task/practice
+  // state) obvious without relying on handleNavigate's unrelated resets.
+  function handleCreateSessionForStudent(student) {
+    if (!canViewOthers(activeUser?.role) || !student) return;
+    setViewedUser({ id: student.id, username: student.username, role: student.role });
+    setCurrentView('progress');
+    setRequestOpenAddSession(true);
+  }
+
+  // "Open" on a specific session in My Students' "View sessions" history
+  // panel — jumps straight to review mode for that student WITH that exact
+  // session selected (via pendingOpenSessionId, see loadSessionsForContext),
+  // rather than whichever session the student last opened. Once there, the
+  // mentor already has full edit/archive/reopen tooling via the existing
+  // Sidebar controls — this intentionally does not duplicate those actions.
+  function handleOpenStudentSession(student, session) {
+    if (!canViewOthers(activeUser?.role) || !student || !session) return;
+    setPendingOpenSessionId(session.id);
+    setViewedUser({ id: student.id, username: student.username, role: student.role });
+    setCurrentView('progress');
+  }
+
   // Admin deleted another user's account from User Management. UserManagementView
   // already removes the row from its own local list — this only needs to clear
   // viewedUser if the deleted account was the one currently being reviewed, so
@@ -498,11 +552,30 @@ export default function App() {
       }
       case 'users':
         return activeUser?.role === 'admin'
-          ? <UserManagementView activeUser={activeUser} onReviewUser={handleSelectViewedUser} onUserDeleted={handleUserDeleted} />
+          ? (
+            <UserManagementView
+              activeUser={activeUser}
+              onReviewUser={handleSelectViewedUser}
+              onUserDeleted={handleUserDeleted}
+              // An admin changing their OWN role away from admin loses access
+              // to this screen immediately (role is re-derived fresh from the
+              // DB on every request — see backend PATCH /api/users/:id/role).
+              // Reuse the same full logout flow as Sidebar's account panel so
+              // they land on a clean login screen rather than a stale,
+              // now-wrong-permission view.
+              onSelfRoleChanged={handleLogout}
+            />
+          )
           : null;
       case 'my-students':
         return activeUser?.role === 'mentor'
-          ? <MyStudentsView onSelectStudent={handleSelectViewedUser} />
+          ? (
+            <MyStudentsView
+              onSelectStudent={handleSelectViewedUser}
+              onCreateSessionForStudent={handleCreateSessionForStudent}
+              onOpenStudentSession={handleOpenStudentSession}
+            />
+          )
           : null;
       default:
         return <PracticeView activeUser={activeUser} activeSession={activeSession} />;

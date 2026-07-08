@@ -1,8 +1,10 @@
 'use strict';
 
 /**
- * Authorization + behavior verification for the mentor-facing endpoint:
+ * Authorization + behavior verification for the mentor-facing endpoints:
  *   GET /api/mentor/students
+ *   GET /api/mentor/students/summary
+ *   GET /api/mentor/students/:studentId/sessions
  *
  * Spins up a minimal in-process Express app (session middleware + the auth
  * router + the mentor-students router, mounted the same way as in
@@ -40,6 +42,21 @@ function fail(id, name, detail) {
 }
 
 async function cleanup() {
+  // task_attempts.user_id and user_task_progress.user_id have no ON DELETE
+  // action of their own (unlike their session_id FKs, which cascade from
+  // learning_sessions) — a leftover row from the summary/sessions fixture
+  // below (which seeds a real user_task_progress row) would otherwise make
+  // the final DELETE FROM users fail with an FK violation. Same pattern as
+  // check-authz.js's cleanup().
+  await pool.query(`
+    DELETE FROM task_attempts WHERE session_id IN (
+      SELECT id FROM learning_sessions WHERE user_id IN (SELECT id FROM users WHERE username LIKE $1)
+    )`, [`${PREFIX}%`]);
+  await pool.query(`
+    DELETE FROM user_task_progress WHERE session_id IN (
+      SELECT id FROM learning_sessions WHERE user_id IN (SELECT id FROM users WHERE username LIKE $1)
+    )`, [`${PREFIX}%`]);
+  await pool.query(`DELETE FROM learning_sessions WHERE user_id IN (SELECT id FROM users WHERE username LIKE $1)`, [`${PREFIX}%`]);
   await pool.query('DELETE FROM users WHERE username LIKE $1', [`${PREFIX}%`]);
 }
 
@@ -213,6 +230,184 @@ async function run() {
         pass('h', `Row shape includes id/username/role/assigned_at (${JSON.stringify(row)})`);
       } else {
         fail('h', 'Row must include id, username, role, assigned_at', `row=${JSON.stringify(row)}`);
+      }
+    }
+
+    // ── GET /api/mentor/students/summary ────────────────────────────────────
+    const summaryUrl = `${base}/api/mentor/students/summary`;
+
+    // Seed alice with 3 real sessions (active/completed/archived) and one
+    // solved task, so the aggregated counts below have something real to
+    // check instead of all zeros. Inserted directly for setup speed, same
+    // pattern check-authz.js's case g uses for its owned-session fixture.
+    const dataset = await pool.query("SELECT id FROM datasets WHERE key = 'academic'");
+    const datasetId = dataset.rows[0].id;
+
+    const activeSessionRow = await pool.query(
+      `INSERT INTO learning_sessions (user_id, created_by_user_id, name, dataset_id)
+       VALUES ($1, $1, $2, $3) RETURNING id`,
+      [studentAlice, `${PREFIX}alice_active`, datasetId]
+    );
+    const completedSessionRow = await pool.query(
+      `INSERT INTO learning_sessions (user_id, created_by_user_id, name, dataset_id, status, completed_at)
+       VALUES ($1, $1, $2, $3, 'completed', NOW()) RETURNING id`,
+      [studentAlice, `${PREFIX}alice_completed`, datasetId]
+    );
+    const archivedSessionRow = await pool.query(
+      `INSERT INTO learning_sessions (user_id, created_by_user_id, name, dataset_id, archived_at, archived_by_user_id)
+       VALUES ($1, $1, $2, $3, NOW(), $4) RETURNING id`,
+      [studentAlice, `${PREFIX}alice_archived`, datasetId, mentorAId]
+    );
+    const activeSessionId    = activeSessionRow.rows[0].id;
+    const completedSessionId = completedSessionRow.rows[0].id;
+    const archivedSessionId  = archivedSessionRow.rows[0].id;
+
+    await pool.query(
+      `INSERT INTO user_task_progress (user_id, session_id, task_id, status, attempts_count, last_attempt_at)
+       VALUES ($1, $2, 1, 'solved', 1, NOW())`,
+      [studentAlice, activeSessionId]
+    );
+
+    // ── Case i: mentor summary returns exactly their assigned students with
+    // the expected aggregate shape ─────────────────────────────────────────
+    {
+      const res = await fetch(summaryUrl, { headers: { Cookie: mentorACookie } });
+      const body = await res.json();
+      const usernames = body.map(s => s.username).sort();
+      const expectedUsernames = [`${PREFIX}alice`, `${PREFIX}zoe`].sort();
+      const alice = body.find(s => s.username === `${PREFIX}alice`);
+      const shapeOk = alice &&
+        alice.active_sessions === 1 &&
+        alice.completed_sessions === 1 &&
+        alice.archived_sessions === 1 &&
+        alice.solved_count === 1 &&
+        !!alice.last_activity;
+      if (res.status === 200 && JSON.stringify(usernames) === JSON.stringify(expectedUsernames) && shapeOk) {
+        pass('i', `Mentor summary returns assigned students with correct aggregate counts (alice: ${JSON.stringify(alice)})`);
+      } else {
+        fail('i', 'Mentor summary must return assigned students with correct counts', `status=${res.status}, body=${JSON.stringify(body)}`);
+      }
+    }
+
+    // ── Case j: mentor summary does not include another mentor's student ───
+    {
+      const res = await fetch(summaryUrl, { headers: { Cookie: mentorACookie } });
+      const body = await res.json();
+      const includesBob = body.some(s => s.username === `${PREFIX}bob`);
+      if (res.status === 200 && !includesBob) {
+        pass('j', "Mentor summary does not include mentor B's student");
+      } else {
+        fail('j', 'Mentor summary must not include another mentor\'s student', `body=${JSON.stringify(body)}`);
+      }
+    }
+
+    // ── Case k: student blocked from /students/summary ──────────────────────
+    {
+      const res = await fetch(summaryUrl, { headers: { Cookie: studentCookie } });
+      if (res.status === 403) {
+        pass('k', 'Student is blocked from GET /api/mentor/students/summary (403)');
+      } else {
+        fail('k', 'Student must be blocked from the summary endpoint', `status=${res.status}`);
+      }
+    }
+
+    // ── Case l: admin blocked from /students/summary (mentor-only, same as
+    // /students) ─────────────────────────────────────────────────────────────
+    {
+      const res = await fetch(summaryUrl, { headers: { Cookie: adminCookie } });
+      if (res.status === 403) {
+        pass('l', 'Admin is blocked from GET /api/mentor/students/summary (403) — own roster is not a meaningful concept for admin');
+      } else {
+        fail('l', 'Admin must be blocked from the summary endpoint', `status=${res.status}`);
+      }
+    }
+
+    // ── Case m: unauthenticated blocked from /students/summary ──────────────
+    {
+      const res = await fetch(summaryUrl);
+      if (res.status === 401) {
+        pass('m', 'Unauthenticated request to /students/summary returns 401');
+      } else {
+        fail('m', 'Unauthenticated request must return 401', `status=${res.status}`);
+      }
+    }
+
+    // ── GET /api/mentor/students/:studentId/sessions ────────────────────────
+
+    // ── Case n: assigned mentor can view their student's session history,
+    // including the archived session (unlike GET /api/sessions' default) ────
+    {
+      const res = await fetch(`${base}/api/mentor/students/${studentAlice}/sessions`, { headers: { Cookie: mentorACookie } });
+      const body = await res.json();
+      const sessionIds = body.map(s => s.id);
+      const hasAllThree = [activeSessionId, completedSessionId, archivedSessionId].every(id => sessionIds.includes(id));
+      const archivedRow = body.find(s => s.id === archivedSessionId);
+      const activeRow   = body.find(s => s.id === activeSessionId);
+      if (res.status === 200 && hasAllThree && archivedRow?.archived_at && activeRow?.solved_count === 1) {
+        pass('n', "Assigned mentor sees the student's full session history, including the archived session and solved_count");
+      } else {
+        fail('n', 'Assigned mentor must see full session history with archived sessions included', `status=${res.status}, body=${JSON.stringify(body)}`);
+      }
+    }
+
+    // ── Case o: mentor A cannot view an UNASSIGNED student's sessions (bob
+    // belongs only to mentor B) — the core assigned-vs-unassigned check ─────
+    {
+      const res = await fetch(`${base}/api/mentor/students/${studentBobBOnly}/sessions`, { headers: { Cookie: mentorACookie } });
+      if (res.status === 403) {
+        pass('o', "Mentor A is blocked from an unassigned student's (bob's) sessions (403)");
+      } else {
+        fail('o', 'Mentor must be blocked from an unassigned student\'s sessions', `status=${res.status}`);
+      }
+    }
+
+    // ── Case p: student is blocked even for their OWN id — this route is
+    // mentor/admin-only, not a self-access route ─────────────────────────────
+    {
+      const selfIdRes = await fetch(`${base}/api/mentor/students/${studentAlice}/sessions`, { headers: { Cookie: studentCookie } });
+      // Also verify with the student's own literal id, in case actor==target
+      // self-access is what's under test elsewhere in the app.
+      const meRes = await fetch(`${base}/api/auth/me`, { headers: { Cookie: studentCookie } });
+      const meBody = await meRes.json();
+      const ownIdRes = await fetch(`${base}/api/mentor/students/${meBody.id}/sessions`, { headers: { Cookie: studentCookie } });
+      if (selfIdRes.status === 403 && ownIdRes.status === 403) {
+        pass('p', 'Student is blocked from /students/:id/sessions for any id, including their own (403)');
+      } else {
+        fail('p', 'Student must be blocked regardless of target id', `otherIdStatus=${selfIdRes.status}, ownIdStatus=${ownIdRes.status}`);
+      }
+    }
+
+    // ── Case q: admin can view any student's sessions via this route too ────
+    {
+      const res = await fetch(`${base}/api/mentor/students/${studentBobBOnly}/sessions`, { headers: { Cookie: adminCookie } });
+      if (res.status === 200) {
+        pass('q', "Admin can view any student's sessions via /students/:id/sessions (200)");
+      } else {
+        fail('q', 'Admin must be able to view any student\'s sessions', `status=${res.status}`);
+      }
+    }
+
+    // ── Case r: unauthenticated blocked from /students/:id/sessions ─────────
+    {
+      const res = await fetch(`${base}/api/mentor/students/${studentAlice}/sessions`);
+      if (res.status === 401) {
+        pass('r', 'Unauthenticated request to /students/:id/sessions returns 401');
+      } else {
+        fail('r', 'Unauthenticated request must return 401', `status=${res.status}`);
+      }
+    }
+
+    // ── Case s: password_hash never exposed in either new endpoint ──────────
+    {
+      const summaryRes = await fetch(summaryUrl, { headers: { Cookie: mentorACookie } });
+      const summaryBody = await summaryRes.json();
+      const sessionsRes = await fetch(`${base}/api/mentor/students/${studentAlice}/sessions`, { headers: { Cookie: mentorACookie } });
+      const sessionsBody = await sessionsRes.json();
+      const leaked = summaryBody.some(r => 'password_hash' in r) || sessionsBody.some(r => 'password_hash' in r);
+      if (!leaked) {
+        pass('s', 'password_hash is never present in /students/summary or /students/:id/sessions responses');
+      } else {
+        fail('s', 'password_hash must never be returned', `summary=${JSON.stringify(summaryBody)}, sessions=${JSON.stringify(sessionsBody)}`);
       }
     }
 

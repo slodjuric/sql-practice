@@ -1,1 +1,17 @@
-[]
+[
+  {
+    "id": 2000,
+    "datasetKey": "football",
+    "category": "SELECT basics",
+    "topicId": "select",
+    "levelId": "introduction",
+    "title": "Select all countries",
+    "description": "Show all columns and all rows from the countries table.",
+    "tables": [
+      "countries"
+    ],
+    "difficulty": "easy",
+    "hint": "Use SELECT * and FROM countries.",
+    "solution": "SELECT *\nFROM countries;"
+  }
+]

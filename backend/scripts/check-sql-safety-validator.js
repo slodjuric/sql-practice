@@ -151,6 +151,20 @@ const cases = [
     expectSafe:    false,
     expectKeyword: 'COPY',
   },
+  {
+    id: 23,
+    name: 'SELECT * INTO blocked (creates a new table despite starting with SELECT)',
+    sql: 'SELECT * INTO new_table FROM students;',
+    expectSafe:    false,
+    expectKeyword: 'INTO',
+  },
+  {
+    id: 24,
+    name: 'SELECT column INTO blocked',
+    sql: 'SELECT name INTO temp_students FROM students;',
+    expectSafe:    false,
+    expectKeyword: 'INTO',
+  },
 ];
 
 // ─── Runner ───────────────────────────────────────────────────────────────────

@@ -208,6 +208,20 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
   taskStatusRef.current       = taskStatus;
   const initialAttemptSqlRef  = useRef(initialAttemptSql);
   initialAttemptSqlRef.current = initialAttemptSql;
+  const taskIdRef              = useRef(taskId);
+  taskIdRef.current            = taskId;
+
+  // Tracks whether the component is still mounted, for async handlers below
+  // (not effects — those get their own `cancelled` flag) that may resolve after unmount.
+  // Must set true on mount, not just false on cleanup — React 18 StrictMode
+  // (see main.jsx) runs this effect's setup+cleanup once immediately in dev to
+  // surface unsafe effects; without resetting to true on (re-)mount, this ref
+  // would be stuck at false for the component's entire real lifetime.
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
 
   // Sync localStatus upward whenever the persisted prop arrives or changes from outside
   // (e.g. loadStatuses completes after the component already mounted).
@@ -228,6 +242,7 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
   useEffect(() => {
     const cache      = executionCacheRef.current;
     const attemptSql = initialAttemptSqlRef.current;
+    let cancelled = false;
     setTask(null);
     setLocalStatus(taskStatusRef.current ?? 'not_started');
     if (attemptSql) {
@@ -249,6 +264,7 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
     setPreviewVisible(false);
 
     api.tasks.get(taskId).then(t => {
+      if (cancelled) return;
       setTask(t);
       if (t.tables && t.tables.length > 0) {
         setOpenTabs(t.tables);
@@ -256,6 +272,8 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
         setPreviewVisible(true);
       }
     });
+
+    return () => { cancelled = true; };
   }, [practiceKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Open a table tab requested from the sidebar (via App)
@@ -344,7 +362,11 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
 
   async function handleShowSolution() {
     if (!solution) {
-      const data = await api.tasks.solution(taskId);
+      const requestedTaskId = taskId;
+      const data = await api.tasks.solution(requestedTaskId);
+      // Discard if the user switched tasks (or navigated away) while this was in flight —
+      // otherwise a slow response for the previous task could set its solution text here.
+      if (!isMountedRef.current || taskIdRef.current !== requestedTaskId) return;
       setSolution(data.solution);
     }
     setShowSolution(s => !s);
@@ -524,6 +546,7 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
           onTabClose={closeTab}
           onToggleVisibility={() => setPreviewVisible(v => !v)}
           onCacheUpdate={(name, data) => setTableCache(prev => ({ ...prev, [name]: data }))}
+          sessionId={activeSession?.id}
         />
 
         {/* Query result */}

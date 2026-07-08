@@ -2,6 +2,7 @@ import { useState, useEffect, Fragment } from 'react';
 import { api } from '../api';
 import { roleLabel } from '../utils/roleLabels';
 import PasswordField from './shared/PasswordField';
+import FormSelect from './FormSelect';
 
 const ROLE_OPTIONS = ['student', 'mentor', 'admin'];
 const MIN_PASSWORD_LENGTH = 8;
@@ -15,12 +16,33 @@ function reviewLabel(role) {
   if (role === 'mentor')  return 'View students';
   return 'View activity';
 }
-export default function UserManagementView({ activeUser, onReviewUser, onUserDeleted }) {
+const ROLE_LABELS = {
+  total_users: 'Total Users',
+  admins: 'Admins',
+  mentors: 'Professors',
+  students: 'Students',
+  active_sessions: 'Active Sessions',
+  completed_sessions: 'Completed Sessions',
+  archived_sessions: 'Archived Sessions',
+  mentor_assignments: 'Assignments',
+};
+
+// Order the summary cards are displayed in — keeps user counts together,
+// then session lifecycle counts, then the assignment count.
+const SUMMARY_CARD_ORDER = [
+  'total_users', 'admins', 'mentors', 'students',
+  'active_sessions', 'completed_sessions', 'archived_sessions', 'mentor_assignments',
+];
+
+export default function UserManagementView({ activeUser, onReviewUser, onUserDeleted, onSelfRoleChanged }) {
   const [activeTab, setActiveTab] = useState('users');
 
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  const [summary, setSummary] = useState(null);
+  const [summaryError, setSummaryError] = useState(null);
 
   const [showForm, setShowForm] = useState(false);
   const [username, setUsername] = useState('');
@@ -51,6 +73,13 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
   const [assigning, setAssigning] = useState(false);
   const [removingId, setRemovingId] = useState(null);
 
+  // Edit-role inline form — same keyed-by-user-id pattern as the reset
+  // password row above, so only one row's form is open at a time.
+  const [editingRoleId, setEditingRoleId] = useState(null);
+  const [editRoleValue, setEditRoleValue] = useState('student');
+  const [editRoleError, setEditRoleError] = useState(null);
+  const [editRoleSaving, setEditRoleSaving] = useState(false);
+
   function loadUsers() {
     setLoading(true);
     setError(null);
@@ -69,9 +98,20 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
       .finally(() => setAssignmentsLoading(false));
   }
 
+  // Aggregated counts for the summary cards above the table — fetched once
+  // on mount, and refreshed after any action that could change the numbers
+  // (create/delete/role-change all call this again).
+  function loadSummary() {
+    setSummaryError(null);
+    api.users.adminSummary()
+      .then(setSummary)
+      .catch(err => setSummaryError(err.message));
+  }
+
   useEffect(() => {
     loadUsers();
     loadAssignments();
+    loadSummary();
   }, []);
 
   function resetForm() {
@@ -126,6 +166,7 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
       setSuccessMessage(`User "${newUser.username}" created successfully.`);
       resetForm();
       setShowForm(false);
+      loadSummary();
     } catch (err) {
       setFormError(err.message);
     } finally {
@@ -158,6 +199,7 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
       setUsers(prev => prev.filter(u => u.id !== user.id));
       setSuccessMessage(`User "${user.username}" deleted.`);
       onUserDeleted?.(user.id);
+      loadSummary();
     } catch (err) {
       setDeleteError(err.message);
     } finally {
@@ -208,6 +250,72 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
     }
   }
 
+  function openRoleEdit(user) {
+    setEditingRoleId(user.id);
+    setEditRoleValue(user.role);
+    setEditRoleError(null);
+    setSuccessMessage(null);
+  }
+
+  function closeRoleEdit() {
+    setEditingRoleId(null);
+    setEditRoleError(null);
+  }
+
+  // Changing a role can invalidate mentor_assignments rows for that user
+  // (backend cleans these up server-side, see PATCH /api/users/:id/role) —
+  // reloading both the summary counts and the assignments list keeps every
+  // view in this screen consistent without requiring a manual tab switch.
+  //
+  // Self-role-change gets its own confirmation and outcome: the acting admin
+  // is always currently 'admin' to even see this screen, so changing their
+  // OWN role away from admin risks losing access to this screen mid-session.
+  // Rather than leave a stale, now-wrong-permission UI on screen, this logs
+  // them out immediately on success (via onSelfRoleChanged, wired to the same
+  // logout flow as Sidebar's own account panel) so their next login lands on
+  // the correct default view for their new role.
+  async function handleRoleSave(user) {
+    setEditRoleError(null);
+
+    if (editRoleValue === user.role) {
+      closeRoleEdit();
+      return;
+    }
+
+    const isSelf = user.id === activeUser?.id;
+    if (isSelf) {
+      const confirmed = window.confirm(
+        `You are changing your OWN role from ${roleLabel(user.role)} to ${roleLabel(editRoleValue)}.\n\n` +
+        `If you no longer have the Admin role, you will lose access to User Management immediately and be logged out so you can log back in with your new role.\n\n` +
+        `Continue?`
+      );
+      if (!confirmed) return;
+    }
+
+    setEditRoleSaving(true);
+    try {
+      const updated = await api.users.updateRole(user.id, editRoleValue);
+      closeRoleEdit();
+
+      if (isSelf) {
+        onSelfRoleChanged?.();
+        return;
+      }
+
+      setUsers(prev => prev.map(u => u.id === user.id ? { ...u, role: updated.role } : u));
+      const removedNote = updated.removedAssignments > 0
+        ? ` ${updated.removedAssignments} mentor-student assignment${updated.removedAssignments === 1 ? '' : 's'} involving this user ${updated.removedAssignments === 1 ? 'was' : 'were'} removed as a result.`
+        : '';
+      setSuccessMessage(`Role for "${user.username}" changed to ${roleLabel(updated.role)}.${removedNote}`);
+      loadSummary();
+      if (updated.removedAssignments > 0) loadAssignments();
+    } catch (err) {
+      setEditRoleError(err.message);
+    } finally {
+      setEditRoleSaving(false);
+    }
+  }
+
   async function handleAssign() {
     if (!selectedMentorId || !selectedStudentId) return;
     setAssignError(null);
@@ -251,6 +359,22 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
         <h2>User Management</h2>
         <p>Manage application users and roles.</p>
       </div>
+
+      {summaryError ? (
+        <div className="user-mgmt-error">{summaryError}</div>
+      ) : (
+        <div className="admin-summary-grid">
+          {SUMMARY_CARD_ORDER.map(key => (
+            <div
+              className={`progress-stat-card admin-summary-card${key === 'total_users' ? ' progress-stat-card--main' : ''}`}
+              key={key}
+            >
+              <div className="progress-stat-value">{summary ? summary[key] : '—'}</div>
+              <div className="progress-stat-label">{ROLE_LABELS[key]}</div>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="user-mgmt-tabs">
         <button
@@ -300,15 +424,13 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
 
               <div className="user-mgmt-form-row">
                 <label className="user-mgmt-label" htmlFor="new-user-role">Role *</label>
-                <select
+                <FormSelect
                   id="new-user-role"
-                  className="user-mgmt-select"
                   value={role}
-                  onChange={e => setRole(e.target.value)}
+                  onChange={setRole}
+                  options={ROLE_OPTIONS.map(r => ({ value: r, label: roleLabel(r) }))}
                   disabled={saving}
-                >
-                  {ROLE_OPTIONS.map(r => <option key={r} value={r}>{roleLabel(r)}</option>)}
-                </select>
+                />
               </div>
 
               <div className="user-mgmt-form-row">
@@ -364,6 +486,7 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
                   <th></th>
                   <th></th>
                   <th></th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
@@ -380,6 +503,20 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
                           onClick={() => onReviewUser?.(u)}
                         >
                           {reviewLabel(u.role)}
+                        </button>
+                      </td>
+                      <td>
+                        {/* Allowed for the admin's own row too — changing your
+                            own role is guarded by its own confirmation inside
+                            handleRoleSave rather than being hidden here, since
+                            an admin correcting their own mistaken role is a
+                            legitimate case, not just an accident to prevent. */}
+                        <button
+                          type="button"
+                          className="user-mgmt-edit-role-btn"
+                          onClick={() => (editingRoleId === u.id ? closeRoleEdit() : openRoleEdit(u))}
+                        >
+                          {editingRoleId === u.id ? 'Cancel' : 'Edit role'}
                         </button>
                       </td>
                       <td>
@@ -415,9 +552,54 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
                         )}
                       </td>
                     </tr>
+                    {editingRoleId === u.id && (
+                      <tr className="user-mgmt-reset-row">
+                        <td colSpan={7}>
+                          <form
+                            className="user-mgmt-form user-mgmt-role-edit-form"
+                            onSubmit={e => { e.preventDefault(); handleRoleSave(u); }}
+                          >
+                            <div className="user-mgmt-reset-form-title">Edit role for {u.username}</div>
+
+                            <div className="user-mgmt-form-row">
+                              <label className="user-mgmt-label" htmlFor={`edit-role-${u.id}`}>Role *</label>
+                              <FormSelect
+                                id={`edit-role-${u.id}`}
+                                value={editRoleValue}
+                                onChange={setEditRoleValue}
+                                options={ROLE_OPTIONS.map(r => ({ value: r, label: roleLabel(r) }))}
+                                disabled={editRoleSaving}
+                              />
+                            </div>
+
+                            {u.role === 'mentor' && editRoleValue !== 'mentor' && (
+                              <div className="user-mgmt-hint">
+                                This professor's assigned students will be unassigned — mentor_assignments rows for this user will be removed.
+                              </div>
+                            )}
+                            {u.role === 'student' && editRoleValue !== 'student' && (
+                              <div className="user-mgmt-hint">
+                                This student's professor assignment will be removed, if one exists.
+                              </div>
+                            )}
+
+                            {editRoleError && <div className="user-mgmt-error">{editRoleError}</div>}
+
+                            <div className="user-mgmt-form-actions">
+                              <button type="submit" className="user-mgmt-save-btn" disabled={editRoleSaving || editRoleValue === u.role}>
+                                {editRoleSaving ? 'Saving…' : 'Save'}
+                              </button>
+                              <button type="button" className="user-mgmt-cancel-btn" onClick={closeRoleEdit} disabled={editRoleSaving}>
+                                Cancel
+                              </button>
+                            </div>
+                          </form>
+                        </td>
+                      </tr>
+                    )}
                     {resettingUserId === u.id && (
                       <tr className="user-mgmt-reset-row">
-                        <td colSpan={6}>
+                        <td colSpan={7}>
                           <form
                             className="user-mgmt-form user-mgmt-reset-form"
                             onSubmit={e => { e.preventDefault(); handleResetPassword(u); }}
@@ -483,30 +665,26 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
           <div className="user-mgmt-assign-form">
             <div className="user-mgmt-form-row">
               <label className="user-mgmt-label" htmlFor="assign-mentor">Professor</label>
-              <select
+              <FormSelect
                 id="assign-mentor"
-                className="user-mgmt-select"
                 value={selectedMentorId}
-                onChange={e => setSelectedMentorId(e.target.value)}
+                onChange={setSelectedMentorId}
+                options={mentors.map(m => ({ value: String(m.id), label: m.username }))}
+                placeholder="Select a professor…"
                 disabled={assigning || mentors.length === 0}
-              >
-                <option value="">Select a professor…</option>
-                {mentors.map(m => <option key={m.id} value={m.id}>{m.username}</option>)}
-              </select>
+              />
             </div>
 
             <div className="user-mgmt-form-row">
               <label className="user-mgmt-label" htmlFor="assign-student">Student</label>
-              <select
+              <FormSelect
                 id="assign-student"
-                className="user-mgmt-select"
                 value={selectedStudentId}
-                onChange={e => setSelectedStudentId(e.target.value)}
+                onChange={setSelectedStudentId}
+                options={students.map(s => ({ value: String(s.id), label: s.username }))}
+                placeholder="Select a student…"
                 disabled={assigning || students.length === 0}
-              >
-                <option value="">Select a student…</option>
-                {students.map(s => <option key={s.id} value={s.id}>{s.username}</option>)}
-              </select>
+              />
             </div>
 
             <button

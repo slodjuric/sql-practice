@@ -26,6 +26,15 @@ export default function QueryPlayground({ tableToOpen, onTableOpened, activeUser
   const [tableCache, setTableCache] = useState({});
   const [previewVisible, setPreviewVisible] = useState(true);
 
+  // Reset table preview state on session switch — different datasets can share a
+  // table name (e.g. "countries" exists in both football and nation), so a cached
+  // preview must never be reused across a session/schema change.
+  useEffect(() => {
+    setOpenTabs([]);
+    setActiveTab(null);
+    setTableCache({});
+  }, [activeSession?.id]);
+
   useEffect(() => {
     if (!tableToOpen) return;
     setOpenTabs(prev => prev.includes(tableToOpen) ? prev : [...prev, tableToOpen]);
@@ -67,7 +76,7 @@ export default function QueryPlayground({ tableToOpen, onTableOpened, activeUser
     <div>
       <div className="page-header">
         <h2>Query Playground</h2>
-        <p>Piši i pokreni bilo koji SELECT upit nad bazom. Ctrl+Enter za pokretanje.</p>
+        <p>Write and run any SELECT query against the database. Ctrl+Enter to run.</p>
       </div>
       <div className="page-body">
         <div className="editor-wrapper">
@@ -108,6 +117,7 @@ export default function QueryPlayground({ tableToOpen, onTableOpened, activeUser
           onTabClose={closeTab}
           onToggleVisibility={() => setPreviewVisible(v => !v)}
           onCacheUpdate={(name, data) => setTableCache(prev => ({ ...prev, [name]: data }))}
+          sessionId={activeSession?.id}
         />
 
         <ResultTable

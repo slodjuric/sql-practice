@@ -268,6 +268,94 @@ async function run() {
       }
     }
 
+    // ── Case 11: resetting a user's password invalidates their existing
+    // session — an old, already-logged-in cookie must stop working ─────────
+    {
+      const targetUsername = `${PREFIX}sessiontarget`;
+      const targetId = await createUser(targetUsername, 'student');
+      const { cookie: targetCookie } = await login(base, targetUsername, TEST_PASSWORD);
+
+      const beforeRes = await fetch(`${base}/api/auth/me`, { headers: { Cookie: targetCookie } });
+
+      const resetRes = await fetch(`${usersBase}/${targetId}/password`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ newPassword: 'session-invalidation-pw-1' }),
+      });
+
+      const afterRes = await fetch(`${base}/api/auth/me`, { headers: { Cookie: targetCookie } });
+
+      if (beforeRes.status === 200 && resetRes.status === 200 && afterRes.status === 401) {
+        pass('11', "Resetting a user's password invalidates their existing session (old cookie -> 401)");
+      } else {
+        fail('11', 'Old session must stop working after password reset', `before=${beforeRes.status}, reset=${resetRes.status}, after=${afterRes.status}`);
+      }
+    }
+
+    // ── Case 12: admin's own session survives resetting a DIFFERENT user's
+    // password — no collateral invalidation of the acting admin ───────────
+    {
+      const targetId = await createUser(`${PREFIX}other1`, 'student');
+      const resetRes = await fetch(`${usersBase}/${targetId}/password`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ newPassword: 'other-user-pw-1' }),
+      });
+      const meRes = await fetch(`${base}/api/auth/me`, { headers: { Cookie: adminCookie } });
+
+      if (resetRes.status === 200 && meRes.status === 200) {
+        pass('12', "Admin's own session remains valid after resetting a different user's password");
+      } else {
+        fail('12', "Admin's session must not be invalidated by resetting someone else's password", `reset=${resetRes.status}, me=${meRes.status}`);
+      }
+    }
+
+    // ── Case 13: an unrelated third user's session is untouched by someone
+    // else's password reset — only the target user's sessions are deleted ──
+    {
+      const bystanderUsername = `${PREFIX}bystander`;
+      await createUser(bystanderUsername, 'student');
+      const { cookie: bystanderCookie } = await login(base, bystanderUsername, TEST_PASSWORD);
+
+      const targetId = await createUser(`${PREFIX}other2`, 'student');
+      const resetRes = await fetch(`${usersBase}/${targetId}/password`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify({ newPassword: 'other-user-pw-2' }),
+      });
+      const bystanderMeRes = await fetch(`${base}/api/auth/me`, { headers: { Cookie: bystanderCookie } });
+
+      if (resetRes.status === 200 && bystanderMeRes.status === 200) {
+        pass('13', "An unrelated third user's session is unaffected by someone else's password reset");
+      } else {
+        fail('13', 'Unrelated session must remain valid', `reset=${resetRes.status}, bystander=${bystanderMeRes.status}`);
+      }
+    }
+
+    // ── Case 14: admin resetting their OWN password invalidates their own
+    // current session too — forced re-login, no self-exception ────────────
+    {
+      const selfAdminUsername = `${PREFIX}selfadmin`;
+      const selfAdminId = await createUser(selfAdminUsername, 'admin');
+      const { cookie: selfAdminCookie } = await login(base, selfAdminUsername, TEST_PASSWORD);
+
+      const beforeRes = await fetch(`${base}/api/auth/me`, { headers: { Cookie: selfAdminCookie } });
+
+      const resetRes = await fetch(`${usersBase}/${selfAdminId}/password`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Cookie: selfAdminCookie },
+        body: JSON.stringify({ newPassword: 'self-reset-pw-1' }),
+      });
+
+      const afterRes = await fetch(`${base}/api/auth/me`, { headers: { Cookie: selfAdminCookie } });
+
+      if (beforeRes.status === 200 && resetRes.status === 200 && afterRes.status === 401) {
+        pass('14', "Admin resetting their own password invalidates their own current session (forced re-login)");
+      } else {
+        fail('14', 'Self password reset must force re-login', `before=${beforeRes.status}, reset=${resetRes.status}, after=${afterRes.status}`);
+      }
+    }
+
   } catch (err) {
     console.error('UNEXPECTED ERROR:', err.message);
     failed++;

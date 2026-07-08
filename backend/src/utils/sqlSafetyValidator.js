@@ -9,6 +9,9 @@
 //
 // "replace" is intentionally absent: REPLACE() is a standard read-only PostgreSQL
 // string function used in text-manipulation tasks.
+//
+// "into" blocks PostgreSQL's SELECT ... INTO new_table, which would otherwise
+// create a new table despite starting with SELECT.
 const BLOCKED_KEYWORDS = [
   'drop',
   'delete',
@@ -23,6 +26,7 @@ const BLOCKED_KEYWORDS = [
   'call',
   'execute',
   'copy',
+  'into',
 ];
 
 // Validate that a SQL string is safe to run in a read-only practice context.

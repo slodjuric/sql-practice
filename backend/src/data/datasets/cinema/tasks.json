@@ -1,1 +1,17 @@
-[]
+[
+  {
+    "id": 1000,
+    "datasetKey": "cinema",
+    "category": "SELECT basics",
+    "topicId": "select",
+    "levelId": "introduction",
+    "title": "First 10 films by id",
+    "description": "Show the id, title, and release_year of the first 10 films, sorted by id in ascending order.",
+    "tables": [
+      "films"
+    ],
+    "difficulty": "easy",
+    "hint": "Use SELECT with the id, title, and release_year columns, then ORDER BY id and LIMIT 10.",
+    "solution": "SELECT id, title, release_year\nFROM films\nORDER BY id\nLIMIT 10;"
+  }
+]

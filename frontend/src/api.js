@@ -43,6 +43,11 @@ export const api = {
     delete: (userId) => request(`/users/${userId}`, { method: 'DELETE' }),
     resetPassword: (userId, newPassword) =>
       request(`/users/${userId}/password`, { method: 'PATCH', body: JSON.stringify({ newPassword }) }),
+    updateRole: (userId, role) =>
+      request(`/users/${userId}/role`, { method: 'PATCH', body: JSON.stringify({ role }) }),
+    // Aggregated counts only (no raw user/session rows) — powers the admin
+    // summary cards in UserManagementView.
+    adminSummary: () => request('/users/admin-summary'),
   },
 
   // Admin-only (enforced backend-side).
@@ -56,6 +61,12 @@ export const api = {
   // Mentor-only (enforced backend-side) — the logged-in mentor's own assigned students.
   mentorStudents: {
     list: () => request('/mentor/students'),
+    // Aggregated per-student counts (sessions by status, solved count, last
+    // activity) in one call — powers the My Students overview table.
+    summary: () => request('/mentor/students/summary'),
+    // Mentor (if assigned) or admin — backend re-authorizes via
+    // canAccessStudent regardless of what studentId is passed here.
+    sessions: (studentId) => request(`/mentor/students/${studentId}/sessions`),
   },
 
   // userId is never sent — the backend resolves it from the session cookie
