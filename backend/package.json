@@ -38,6 +38,7 @@
     "test:session-archive-authz": "node scripts/check-session-archive-authz.js",
     "test:query-limits": "node scripts/check-query-limits.js",
     "test:task-solutions": "node scripts/check-task-solutions.js",
+    "test:tables-authz": "node scripts/check-tables-authz.js",
     "db:init": "node scripts/run-sql-file.js",
     "test:setup-flow": "node scripts/check-setup-flow.js",
     "dataset:import": "node scripts/import-dataset.js",
@@ -52,7 +53,9 @@
     "dotenv": "^16.4.5",
     "express": "^4.18.2",
     "express-session": "^1.19.0",
-    "pg": "^8.11.3"
+    "js-yaml": "^5.2.1",
+    "pg": "^8.11.3",
+    "swagger-ui-express": "^5.0.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"

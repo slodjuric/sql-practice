@@ -7,6 +7,8 @@ import { matchesSessionFilters } from '../utils/taskFilters';
 import { getFriendlySqlErrorMessage } from '../utils/sqlErrorMessages';
 import StatusBadge from './shared/StatusBadge';
 import { DIFFICULTY_CLASS } from '../constants/difficulties';
+import { isSessionCompleted } from '../utils/sessionStatus';
+import { useTablePreviewTabs } from '../utils/useTablePreviewTabs';
 
 function displayVal(v) {
   return v === null ? 'NULL' : String(v);
@@ -181,7 +183,19 @@ function CheckBanner({ checkResult, sql }) {
   );
 }
 
-export default function TaskView({ activeUser, activeSession, sessionFilters, taskId, onBack, category, onBackToCategories, tableToOpenInTask, onTableOpened, executionCache, onExecutionCacheUpdate, taskStatus, onStatusChange, refreshTaskStatuses, initialAttemptSql, onInitialAttemptSqlConsumed, onProgressInvalidate, origin, onBackToProgress }) {
+// reviewContext (only ever set by PracticeView when the task was opened from
+// a REVIEWED user's Progress — see App.jsx/ProgressView.jsx) is a read-only
+// display context: { sessionId, datasetKey, filters, username } for the
+// REVIEWED user's session. It governs "is this task in their current plan"
+// and which session's tables Table Preview resolves against — it is never
+// used to run/check as the student, and Run/Check are unconditionally
+// disabled whenever it's set (see isReviewTask below). activeSession/
+// sessionFilters continue to mean exactly what they always did: the ACTING
+// user's own session, still the only thing Run/Check ever read from.
+export default function TaskView({ activeUser, activeSession, sessionFilters, taskId, onBack, category, onBackToCategories, tableToOpenInTask, onTableOpened, executionCache, onExecutionCacheUpdate, taskStatus, onStatusChange, refreshTaskStatuses, initialAttemptSql, onInitialAttemptSqlConsumed, onProgressInvalidate, origin, onBackToProgress, reviewContext }) {
+  const isReviewTask = !!reviewContext;
+  const effectiveFilters = isReviewTask ? reviewContext.filters : sessionFilters;
+  const previewSessionId = isReviewTask ? reviewContext.sessionId : activeSession?.id;
   const [task, setTask] = useState(null);
   const [sql, setSql] = useState('');
   const [result, setResult] = useState(null);
@@ -195,11 +209,13 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
   const [checkResult, setCheckResult] = useState(null);
   const [localStatus, setLocalStatus] = useState(taskStatus ?? 'not_started');
 
-  // Table preview state
-  const [openTabs, setOpenTabs] = useState([]);
-  const [activeTab, setActiveTab] = useState(null);
-  const [tableCache, setTableCache] = useState({});
-  const [previewVisible, setPreviewVisible] = useState(false);
+  // Table preview state — shared shape/bookkeeping with QueryPlayground,
+  // see utils/useTablePreviewTabs.
+  const {
+    openTabs, activeTab, tableCache, previewVisible,
+    setOpenTabs, setActiveTab, setTableCache, setPreviewVisible,
+    resetTabs, openTab, closeTab,
+  } = useTablePreviewTabs();
 
   // Always-current refs so effects below read the latest values without re-running
   const executionCacheRef     = useRef(executionCache);
@@ -210,6 +226,8 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
   initialAttemptSqlRef.current = initialAttemptSql;
   const taskIdRef              = useRef(taskId);
   taskIdRef.current            = taskId;
+  const reviewContextRef       = useRef(reviewContext);
+  reviewContextRef.current     = reviewContext;
 
   // Tracks whether the component is still mounted, for async handlers below
   // (not effects — those get their own `cancelled` flag) that may resolve after unmount.
@@ -235,33 +253,49 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
     });
   }, [taskStatus]);
 
-  // localStorage key scoped to user + session + task
-  const practiceKey = `lastQuery:practice:${activeUser?.id}:${activeSession?.id}:${taskId}`;
+  // localStorage key scoped to user + session + task — also incorporates the
+  // reviewed session's id (when reviewing) so switching from one reviewed
+  // student's attempt at a task to a DIFFERENT student's attempt at the same
+  // task correctly resets this view instead of silently reusing stale state.
+  const practiceKey = `lastQuery:practice:${activeUser?.id}:${activeSession?.id}:${taskId}:${reviewContext?.sessionId ?? ''}`;
 
   // Load task and initialize table tabs; restore last executed SQL from localStorage (fallback: in-memory cache)
   useEffect(() => {
     const cache      = executionCacheRef.current;
     const attemptSql = initialAttemptSqlRef.current;
+    const reviewCtx  = reviewContextRef.current;
     let cancelled = false;
     setTask(null);
     setLocalStatus(taskStatusRef.current ?? 'not_started');
     if (attemptSql) {
       setSql(attemptSql);
       onInitialAttemptSqlConsumed?.();
+    } else if (reviewCtx) {
+      // Review mode never restores the acting user's own unrelated
+      // localStorage draft for this taskId — that would leak the mentor's
+      // own unrelated scratch work into what's meant to be a clean,
+      // read-only look at the reviewed student's task.
+      setSql('');
     } else {
       const savedSql = localStorage.getItem(practiceKey);
       setSql(savedSql ?? cache?.sql ?? '');
     }
-    setResult(cache?.result ?? null);
-    setError(cache?.error ?? null);
+    // Same reasoning as the SQL restore above — never show the acting
+    // user's own cached result/error for this taskId while reviewing.
+    setResult(reviewCtx ? null : (cache?.result ?? null));
+    setError(reviewCtx ? null : (cache?.error ?? null));
     setShowSolution(false);
     setSolution(null);
     setShowHint(false);
     setCheckResult(null);
-    setOpenTabs([]);
-    setActiveTab(null);
-    setTableCache({});
+    resetTabs();
     setPreviewVisible(false);
+    // A Run/Check request for the PREVIOUS task may still be in flight when
+    // the user switches — its own guard (see runQuery/checkAnswer below)
+    // will now skip clearing this, since taskIdRef no longer matches, so
+    // this reset is what actually stops the spinner from getting stuck on
+    // the newly-selected task.
+    setIsLoading(false);
 
     api.tasks.get(taskId).then(t => {
       if (cancelled) return;
@@ -279,26 +313,21 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
   // Open a table tab requested from the sidebar (via App)
   useEffect(() => {
     if (!tableToOpenInTask) return;
-    setOpenTabs(prev => prev.includes(tableToOpenInTask) ? prev : [...prev, tableToOpenInTask]);
-    setActiveTab(tableToOpenInTask);
-    setPreviewVisible(true);
+    openTab(tableToOpenInTask);
     onTableOpened?.();
   }, [tableToOpenInTask]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  function closeTab(tableName, e) {
-    e.stopPropagation();
-    const newTabs = openTabs.filter(t => t !== tableName);
-    setOpenTabs(newTabs);
-    if (activeTab === tableName) {
-      const idx = openTabs.indexOf(tableName);
-      setActiveTab(newTabs[Math.min(idx, newTabs.length - 1)] ?? null);
-    }
-  }
-
   async function runQuery() {
+    // Defense in depth — the button/editor are already disabled whenever
+    // isReviewTask is true, but this guarantees no write can ever happen
+    // here even if triggered another way (e.g. the editor's Ctrl+Enter
+    // shortcut), matching the "must not silently write attempts for the
+    // mentor either" requirement.
+    if (isReviewTask) return;
     if (!sql.trim()) return;
-    if (activeSession?.status === 'completed' || activeSession?.archived_at) return;
+    if (isSessionCompleted(activeSession) || activeSession?.archived_at) return;
     if (!task || !matchesSessionFilters(task, sessionFilters)) return;
+    const requestedTaskId = taskId;
     localStorage.setItem(practiceKey, sql);
     setIsLoading(true);
     setError(null);
@@ -307,55 +336,82 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
     setShowSolution(false);
     setPreviewVisible(false);
     try {
-      const data = await api.query(sql, taskId, activeSession?.id);
+      const data = await api.query(sql, requestedTaskId, activeSession?.id);
+      // Discard if the user switched tasks (or navigated away) while this
+      // was in flight — otherwise a slow response for the previous task
+      // could overwrite the result/status shown for whatever task is on
+      // screen now. Same guard as handleShowSolution below.
+      if (!isMountedRef.current || taskIdRef.current !== requestedTaskId) return;
       setResult(data);
-      onExecutionCacheUpdate?.(taskId, { sql, result: data, error: null });
+      onExecutionCacheUpdate?.(requestedTaskId, { sql, result: data, error: null });
       if (localStatus !== 'solved') {
         setLocalStatus('in_progress');
-        onStatusChange?.(taskId, 'in_progress');
+        onStatusChange?.(requestedTaskId, 'in_progress');
       }
     } catch (err) {
+      if (!isMountedRef.current || taskIdRef.current !== requestedTaskId) return;
       const friendly = getFriendlySqlErrorMessage(err.message, sql, 'practice');
       setError(friendly);
-      onExecutionCacheUpdate?.(taskId, { sql, result: null, error: friendly });
+      onExecutionCacheUpdate?.(requestedTaskId, { sql, result: null, error: friendly });
       if (localStatus !== 'solved') {
         setLocalStatus('in_progress');
-        onStatusChange?.(taskId, 'in_progress');
+        onStatusChange?.(requestedTaskId, 'in_progress');
       }
     } finally {
-      setIsLoading(false);
+      // finally always runs, even after the early returns above — so the
+      // guard has to be re-checked here too, otherwise a stale response
+      // would still clear isLoading out from under the current task's own
+      // in-flight (or already-finished) request.
+      if (isMountedRef.current && taskIdRef.current === requestedTaskId) {
+        setIsLoading(false);
+      }
       await refreshTaskStatuses?.();
     }
   }
 
   async function checkAnswer() {
+    // Same defense-in-depth guard as runQuery above.
+    if (isReviewTask) return;
     if (!sql.trim()) return;
-    if (activeSession?.status === 'completed' || activeSession?.archived_at) return;
+    if (isSessionCompleted(activeSession) || activeSession?.archived_at) return;
+    const requestedTaskId = taskId;
     localStorage.setItem(practiceKey, sql);
     setIsLoading(true);
     setError(null);
     setCheckResult(null);
     try {
-      const data = await api.tasks.check(taskId, sql, activeSession?.id);
+      const data = await api.tasks.check(requestedTaskId, sql, activeSession?.id);
+      // Discard if the user switched tasks (or navigated away) while this
+      // was in flight — otherwise a slow check for the previous task could
+      // overwrite the result/banner/status shown for whatever task is on
+      // screen now. Same guard as handleShowSolution below.
+      if (!isMountedRef.current || taskIdRef.current !== requestedTaskId) return;
       setResult(data.userResult);
       setCheckResult(data);
       onProgressInvalidate?.();
       if (data.isCorrect) {
         setLocalStatus('solved');
-        onStatusChange?.(taskId, 'solved');
+        onStatusChange?.(requestedTaskId, 'solved');
       } else if (localStatus !== 'solved') {
         setLocalStatus('in_progress');
-        onStatusChange?.(taskId, 'in_progress');
+        onStatusChange?.(requestedTaskId, 'in_progress');
       }
     } catch (err) {
+      if (!isMountedRef.current || taskIdRef.current !== requestedTaskId) return;
       const friendly = getFriendlySqlErrorMessage(err.message, sql, 'practice');
       setCheckResult({ failureReason: 'sql_error', errorMessage: friendly });
       if (localStatus !== 'solved') {
         setLocalStatus('in_progress');
-        onStatusChange?.(taskId, 'in_progress');
+        onStatusChange?.(requestedTaskId, 'in_progress');
       }
     } finally {
-      setIsLoading(false);
+      // finally always runs, even after the early returns above — so the
+      // guard has to be re-checked here too, otherwise a stale response
+      // would still clear isLoading out from under the current task's own
+      // in-flight (or already-finished) request.
+      if (isMountedRef.current && taskIdRef.current === requestedTaskId) {
+        setIsLoading(false);
+      }
       await refreshTaskStatuses?.();
     }
   }
@@ -395,7 +451,7 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
 
   if (!task) return <div className="loading">Loading task</div>;
 
-  const isActive = matchesSessionFilters(task, sessionFilters);
+  const isActive = matchesSessionFilters(task, effectiveFilters);
 
   return (
     <div>
@@ -419,11 +475,27 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
       </div>
 
       <div className="page-body" style={{ paddingTop: 12 }}>
+        {/* Review-task banner — only when this specific task was opened from
+            a reviewed user's Progress (reviewContext set). Takes priority
+            over, and explains, the inactive-plan banner below: "not in the
+            current plan" would otherwise misleadingly imply the ACTING
+            user's plan is the relevant one. */}
+        {isReviewTask && (
+          <div className="task-review-banner">
+            <span className="banner-icon">🔒</span>
+            <span>Review mode: execution is disabled. This view shows {reviewContext.username ?? 'the student'}'s task context.</span>
+          </div>
+        )}
+
         {/* Inactive task banner */}
         {!isActive && (
           <div className="task-inactive-banner">
             <span className="banner-icon">⚠️</span>
-            <span>This task is not in the current plan. You can review it, but execution is disabled.</span>
+            <span>
+              {isReviewTask
+                ? `This task is not in ${reviewContext.username ?? 'the student'}'s current plan.`
+                : 'This task is not in the current plan. You can review it, but execution is disabled.'}
+            </span>
           </div>
         )}
 
@@ -461,15 +533,17 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
           )}
         </div>
 
-        {/* Completed session banner */}
-        {activeSession?.status === 'completed' && (
+        {/* Completed/archived session banners refer to the ACTING user's own
+            session — irrelevant (and potentially confusing) while reviewing
+            someone else's task, where the review banner above is already the
+            operative explanation for why execution is disabled. */}
+        {!isReviewTask && isSessionCompleted(activeSession) && (
           <div className="session-completed-banner">
             This session is completed. Reopen it from the sidebar to continue working.
           </div>
         )}
 
-        {/* Archived session banner */}
-        {activeSession?.archived_at && (
+        {!isReviewTask && activeSession?.archived_at && (
           <div className="session-archived-banner">
             This session is archived. Restore it from "Show archived sessions" in the sidebar to continue working.
           </div>
@@ -483,7 +557,7 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
           <div className="editor-header">
             <span className="editor-label">Your SQL</span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              {isActive && activeSession?.status !== 'completed' && !activeSession?.archived_at && (
+              {isActive && !isReviewTask && !isSessionCompleted(activeSession) && !activeSession?.archived_at && (
                 <button className="btn btn-secondary btn-copy" onClick={pasteFromClipboard}>
                   {pastedClipboard ? 'Pasted!' : 'Paste'}
                 </button>
@@ -495,7 +569,7 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
             onChange={setSql}
             onRun={runQuery}
             minHeight={140}
-            readOnly={!isActive || activeSession?.status === 'completed' || !!activeSession?.archived_at}
+            readOnly={isReviewTask || !isActive || isSessionCompleted(activeSession) || !!activeSession?.archived_at}
           />
         </div>
 
@@ -504,14 +578,16 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
           <button
             className="btn btn-primary"
             onClick={runQuery}
-            disabled={isLoading || !sql.trim() || activeSession?.status === 'completed' || !!activeSession?.archived_at || !isActive}
+            disabled={isReviewTask || isLoading || !sql.trim() || isSessionCompleted(activeSession) || !!activeSession?.archived_at || !isActive}
+            title={isReviewTask ? "Execution is disabled while reviewing another user's task." : undefined}
           >
             ▶ Run Query
           </button>
           <button
             className="btn btn-success"
             onClick={checkAnswer}
-            disabled={isLoading || !sql.trim() || activeSession?.status === 'completed' || !!activeSession?.archived_at || !isActive}
+            disabled={isReviewTask || isLoading || !sql.trim() || isSessionCompleted(activeSession) || !!activeSession?.archived_at || !isActive}
+            title={isReviewTask ? "Execution is disabled while reviewing another user's task." : undefined}
           >
             ✓ Check Answer
           </button>
@@ -546,7 +622,7 @@ export default function TaskView({ activeUser, activeSession, sessionFilters, ta
           onTabClose={closeTab}
           onToggleVisibility={() => setPreviewVisible(v => !v)}
           onCacheUpdate={(name, data) => setTableCache(prev => ({ ...prev, [name]: data }))}
-          sessionId={activeSession?.id}
+          sessionId={previewSessionId}
         />
 
         {/* Query result */}

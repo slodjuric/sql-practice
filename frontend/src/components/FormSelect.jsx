@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
+import { useDismissOnOutsideClick } from '../utils/useDismissOnOutsideClick';
 
 // placeholder/disabled/id are optional so existing callers (ProgressView's
 // plan-type select, PracticeView's sort select) that always pass a value
@@ -8,20 +9,7 @@ export default function FormSelect({ id, value, onChange, options, placeholder, 
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
 
-  useEffect(() => {
-    if (!open) return;
-    function onDown(e) {
-      if (ref.current?.contains(e.target)) return;
-      setOpen(false);
-    }
-    function onKey(e) { if (e.key === 'Escape') setOpen(false); }
-    document.addEventListener('mousedown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [open]);
+  useDismissOnOutsideClick(open, () => setOpen(false), ref);
 
   const selected = options.find(o => o.value === value);
 

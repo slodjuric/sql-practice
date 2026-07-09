@@ -1,12 +1,13 @@
 import { useState, useEffect, Fragment } from 'react';
 import { api } from '../api';
 import { formatDateShort } from '../utils/studentRoster';
+import { isSessionCompleted } from '../utils/sessionStatus';
 
 function SessionStatusCell({ session }) {
   if (session.archived_at) {
     return <span className="session-status-badge session-status-badge--archived">archived</span>;
   }
-  const isCompleted = session.status === 'completed';
+  const isCompleted = isSessionCompleted(session);
   return (
     <span className={`session-status-badge session-status-badge--${isCompleted ? 'completed' : 'active'}`}>
       {isCompleted ? 'completed' : 'active'}

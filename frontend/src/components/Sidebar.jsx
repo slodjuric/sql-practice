@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { roleLabel } from '../utils/roleLabels';
+import { isSessionCompleted } from '../utils/sessionStatus';
+import { useDismissOnOutsideClick } from '../utils/useDismissOnOutsideClick';
+import { useConfirmDialog } from '../utils/useConfirmDialog';
+import ConfirmModal from './shared/ConfirmModal';
 
 const SIDEBAR_WIDTH_KEY = 'sidebarWidth';
 const MIN_SIDEBAR_WIDTH = 240;
@@ -41,23 +45,7 @@ function SidebarDropdown({ options, value, onChange, disabled, placeholder }) {
   const triggerRef                = useRef(null);
   const menuRef                   = useRef(null);
 
-  useEffect(() => {
-    if (!open) return;
-    function onDown(e) {
-      if (
-        triggerRef.current?.contains(e.target) ||
-        menuRef.current?.contains(e.target)
-      ) return;
-      setOpen(false);
-    }
-    function onKey(e) { if (e.key === 'Escape') setOpen(false); }
-    document.addEventListener('mousedown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [open]);
+  useDismissOnOutsideClick(open, () => setOpen(false), [triggerRef, menuRef]);
 
   function toggle() {
     if (disabled) return;
@@ -136,6 +124,8 @@ export default function Sidebar({
   requestOpenAddSession,
   onRequestOpenAddSessionConsumed,
 }) {
+  const { confirm, dialogProps } = useConfirmDialog();
+
   const [dbStatus, setDbStatus] = useState('checking');
   const [dbOpen, setDbOpen] = useState(false);
   const [tables, setTables] = useState([]);
@@ -326,9 +316,13 @@ export default function Sidebar({
   // ── User handlers ───────────────────────────────────────────
   async function handleDeleteUser() {
     if (!activeUser) return;
-    const confirmed = window.confirm(
-      `Are you sure you want to delete your account "${activeUser.username}"? This will delete all sessions, progress and activity for this account, and you will be logged out.`
-    );
+    const confirmed = await confirm({
+      title: 'Delete my account',
+      message: `Are you sure you want to delete your account "${activeUser.username}"?`,
+      details: 'This will delete all sessions, progress and activity for this account, and you will be logged out.',
+      confirmLabel: 'Delete account',
+      variant: 'danger',
+    });
     if (!confirmed) return;
     setUserDeleting(true);
     setUserDeleteError(null);
@@ -395,9 +389,13 @@ export default function Sidebar({
 
   async function handleArchiveSession() {
     if (!activeSession) return;
-    const confirmed = window.confirm(
-      `Archive session "${activeSession.name}"? It will be hidden from your session list, but all progress and history will be kept. You can restore it later from "Show archived sessions".`
-    );
+    const confirmed = await confirm({
+      title: 'Archive session',
+      message: `Archive session "${activeSession.name}"?`,
+      details: 'It will be hidden from your session list, but all progress and history will be kept. You can restore it later from "Show archived sessions".',
+      confirmLabel: 'Archive session',
+      variant: 'info',
+    });
     if (!confirmed) return;
     setSessionArchiving(true);
     setSessionArchiveError(null);
@@ -414,9 +412,13 @@ export default function Sidebar({
   // copy that explicitly names what is destroyed and that it cannot be undone.
   async function handleDeleteSessionClick() {
     if (!activeSession) return;
-    const confirmed = window.confirm(
-      `Delete session "${activeSession.name}" permanently? This will delete its attempts, progress, and plan filters. This cannot be undone.`
-    );
+    const confirmed = await confirm({
+      title: 'Delete session',
+      message: `Delete session "${activeSession.name}" permanently?`,
+      details: 'This will delete its attempts, progress, and plan filters. This cannot be undone.',
+      confirmLabel: 'Delete session',
+      variant: 'danger',
+    });
     if (!confirmed) return;
     setSessionDeleting(true);
     setSessionDeleteError(null);
@@ -430,7 +432,14 @@ export default function Sidebar({
   }
 
   async function handleCompleteClick() {
-    if (!window.confirm('Complete this session? It will become read-only. You can reopen it later.')) return;
+    const confirmed = await confirm({
+      title: 'Complete session',
+      message: 'Complete this session?',
+      details: 'It will become read-only. You can reopen it later.',
+      confirmLabel: 'Complete session',
+      variant: 'info',
+    });
+    if (!confirmed) return;
     setSessionActionError(null);
     setSessionActioning(true);
     try {
@@ -522,7 +531,7 @@ export default function Sidebar({
             <div className="sidebar-session-controls">
               <SidebarDropdown
                 options={sessions.map(s => {
-                  const isCompleted = s.status === 'completed';
+                  const isCompleted = isSessionCompleted(s);
                   return {
                     id: s.id,
                     label: s.name,
@@ -570,7 +579,7 @@ export default function Sidebar({
           )}
   
           {activeSession && !activeSession.archived_at && (
-            activeSession.status === 'completed' ? (
+            isSessionCompleted(activeSession) ? (
               // Reopen stays available while reviewing — admin/mentor are
               // allowed to reopen an assigned/any session, unlike Complete
               // below. Students should not see the Reopen action at all —
@@ -821,6 +830,8 @@ export default function Sidebar({
         onMouseDown={startSidebarResize}
         title="Drag to resize sidebar"
       />
+
+      <ConfirmModal {...dialogProps} />
     </div>
   );
 }

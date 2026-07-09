@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { api } from '../api';
 import PasswordField from './shared/PasswordField';
 
-export default function LoginView({ onLogin }) {
+export default function LoginView({ onLogin, notice }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState(null);
@@ -28,6 +28,8 @@ export default function LoginView({ onLogin }) {
       <form className="login-card" onSubmit={handleSubmit}>
         <h1 className="login-title">SQL Practice</h1>
         <span className="login-subtitle">Sign in to continue</span>
+
+        {notice && <div className="login-notice">{notice}</div>}
 
         <label className="login-label" htmlFor="login-username">Username</label>
         <input

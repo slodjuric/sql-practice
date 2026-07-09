@@ -39,6 +39,11 @@ export default function App() {
   // switcher pick — the temporary switcher was removed in this step.
   const [activeUser, setActiveUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  // Shown on the login screen after a logout that needs an explanation (e.g.
+  // self-password-reset below) — cleared on any logout that doesn't pass one
+  // (the normal Sidebar "Log out" click), so it never lingers into an
+  // unrelated later session.
+  const [loginNotice, setLoginNotice] = useState(null);
 
   // ── Session state ───────────────────────────────────────────
   const [sessions,       setSessions]       = useState([]);
@@ -186,22 +191,107 @@ export default function App() {
       .catch(() => setSessionFilters({ topics: [], difficulties: [], projects: [] }));
   }, [activeSession?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Practice context, decoupled from review mode ───────────────
+  // `activeSession`/`sessionFilters` above track whichever "session
+  // context" is currently selected — while a mentor/admin is reviewing
+  // another user (viewedUser set), that's the REVIEWED user's session,
+  // which is correct for Sidebar/Progress (legitimately about the
+  // reviewed user). Practice/TaskView must never receive that: every Run
+  // Query/Check Answer action has to stay scoped to the ACTING user's own
+  // session (see the activeUser/viewedUser invariant in CLAUDE.md) — no
+  // matter how Practice was reached, including "open in practice" links
+  // from a reviewed user's Progress view (ProgressView.jsx's
+  // handleOpenTask/handleOpenAttempt/onOpenCategory, which are reachable
+  // in review mode by design). Root cause of the leak this fixes: those
+  // components previously received the reviewed user's `activeSession`
+  // directly, so a mentor's Run/Check calls were being submitted with the
+  // student's sessionId — the backend re-authorized and never let the
+  // mentor act "as" the student, but it silently fell back to some
+  // unrelated session of the mentor's own, which is confusing and can
+  // misattribute an attempt.
+  //
+  // Outside review mode, `myActiveSession`/`mySessionFilters` are plain
+  // aliases for `activeSession`/`sessionFilters` (no extra fetch, no
+  // behavior change for students or for a mentor/admin not currently
+  // reviewing anyone). Only while reviewing do they get loaded
+  // independently, via the effect below.
+  //
+  // A separate, narrower mechanism (`reviewContext`, built in
+  // ProgressView.jsx and threaded through openTaskFromProgress below) lets a
+  // specific task opened FROM a reviewed user's Progress carry that user's
+  // session/dataset/filters into TaskView too — but only for read-only
+  // display (is this task in THEIR plan, which dataset to preview tables
+  // from), never for Run/Check, which remain hard-scoped to
+  // myActiveSession/mySessionFilters no matter what. The two mechanisms are
+  // intentionally separate: this one governs what Practice can WRITE with,
+  // reviewContext only governs what a single opened task DISPLAYS.
+  const isReviewingOther = canViewOthers(activeUser?.role) && !!viewedUser;
+  const [reviewModeOwnSession, setReviewModeOwnSession] = useState(null);
+  const [reviewModeOwnFilters, setReviewModeOwnFilters] = useState({ topics: [], difficulties: [], projects: [] });
+  const myActiveSession  = isReviewingOther ? reviewModeOwnSession : activeSession;
+  const mySessionFilters = isReviewingOther ? reviewModeOwnFilters : sessionFilters;
+
+  useEffect(() => {
+    if (!isReviewingOther) {
+      setReviewModeOwnSession(null);
+      setReviewModeOwnFilters({ topics: [], difficulties: [], projects: [] });
+      return;
+    }
+    let cancelled = false;
+    api.sessions.list(null)
+      .then(list => {
+        if (cancelled) return;
+        const key     = `activeSessionId:user:${activeUser.id}`;
+        const savedId = localStorage.getItem(key);
+        const saved   = savedId ? list.find(s => s.id === parseInt(savedId, 10)) : null;
+        const byLastOpened = list
+          .filter(s => s.last_opened_at)
+          .sort((a, b) => new Date(b.last_opened_at) - new Date(a.last_opened_at));
+        const picked = saved || byLastOpened[0] || list[0] || null;
+
+        setReviewModeOwnSession(picked);
+        if (!picked) {
+          setReviewModeOwnFilters({ topics: [], difficulties: [], projects: [] });
+          return;
+        }
+        api.sessions.filters(picked.id)
+          .then(filters => { if (!cancelled) setReviewModeOwnFilters(filters); })
+          .catch(() => { if (!cancelled) setReviewModeOwnFilters({ topics: [], difficulties: [], projects: [] }); });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setReviewModeOwnSession(null);
+          setReviewModeOwnFilters({ topics: [], difficulties: [], projects: [] });
+        }
+      });
+    return () => { cancelled = true; };
+  }, [isReviewingOther, activeUser?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Auth management ──────────────────────────────────────────
   function handleLoginSuccess(user) {
     setActiveUser(user);
   }
 
-  async function handleLogout() {
+  // `notice`, when passed, is shown on the login screen after the redirect —
+  // used by flows where the backend has already invalidated the current
+  // session as a side effect (self-role-change, self-password-reset below)
+  // so the user understands why they landed back here instead of assuming
+  // something broke. Omitted (undefined) for a normal Sidebar logout, which
+  // correctly clears any notice a previous forced-logout might have left set.
+  async function handleLogout(notice) {
     try {
       await api.auth.logout();
     } catch {
       // logging out client-side regardless of whether the server call succeeded
+      // (it may already be gone server-side — e.g. a self-password-reset
+      // deletes this exact session row before this ever runs).
     }
     setActiveUser(null);
     setSessions([]);
     setActiveSession(null);
     setViewedUser(null);
     setCurrentView('progress');
+    setLoginNotice(notice ?? null);
   }
 
   // Admin-only, self-delete only (see Sidebar) — deletes the logged-in account.
@@ -457,11 +547,16 @@ export default function App() {
     handleNavigate('progress');
   }
 
-  function openTaskFromProgress({ taskId, topicId, attemptSql }) {
+  function openTaskFromProgress({ taskId, topicId, attemptSql, reviewContext }) {
     setCurrentView('practice');
     setIsInTask(true);
     setPracticeCategory(null);
-    setPracticeTarget({ taskId, topicId, attemptSql: attemptSql || null, origin: 'progress' });
+    // reviewContext (set by ProgressView.jsx only while reviewing another
+    // user) carries the REVIEWED session's id/dataset/filters through to
+    // TaskView for read-only display (in-plan check, table preview) — it is
+    // never used for Run/Check, which stay hard-scoped to myActiveSession
+    // regardless. See PracticeView.jsx/TaskView.jsx's reviewContext handling.
+    setPracticeTarget({ taskId, topicId, attemptSql: attemptSql || null, origin: 'progress', reviewContext: reviewContext || null });
   }
 
   function openCategoryFromProgress(groupId, planType) {
@@ -488,8 +583,8 @@ export default function App() {
         return (
           <PracticeView
             activeUser={activeUser}
-            activeSession={activeSession}
-            sessionFilters={sessionFilters}
+            activeSession={myActiveSession}
+            sessionFilters={mySessionFilters}
             onTaskEnter={() => setIsInTask(true)}
             onTaskExit={() => setIsInTask(false)}
             tableToOpenInTask={tableToOpenInTask}
@@ -564,6 +659,14 @@ export default function App() {
               // they land on a clean login screen rather than a stale,
               // now-wrong-permission view.
               onSelfRoleChanged={handleLogout}
+              // PATCH /api/users/:id/password deletes every one of the
+              // target's active sessions, including — when the target is the
+              // acting admin themselves — the very session this request runs
+              // on. Without this, the UI would keep looking logged in while
+              // the backend can no longer resolve an acting user, surfacing a
+              // confusing "Acting user is required." on the next unrelated
+              // action instead of a clean re-login prompt.
+              onSelfPasswordReset={() => handleLogout('Your password was changed. Please log in again.')}
             />
           )
           : null;
@@ -578,7 +681,7 @@ export default function App() {
           )
           : null;
       default:
-        return <PracticeView activeUser={activeUser} activeSession={activeSession} />;
+        return <PracticeView activeUser={activeUser} activeSession={myActiveSession} sessionFilters={mySessionFilters} />;
     }
   }
 
@@ -587,7 +690,7 @@ export default function App() {
   }
 
   if (!activeUser) {
-    return <LoginView onLogin={handleLoginSuccess} />;
+    return <LoginView onLogin={handleLoginSuccess} notice={loginNotice} />;
   }
 
   return (

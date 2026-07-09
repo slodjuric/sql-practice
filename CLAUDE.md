@@ -229,7 +229,7 @@ A mentor can create/edit/archive/restore/reopen a session for an assigned studen
 | `/api/users` | `routes/users.js` | `GET /`, `GET /admin-summary`, `POST /`, `DELETE /:id`, `PATCH /:id/password`, `PATCH /:id/role` | admin-only (`requireRole('admin')`) |
 | `/api/sessions` | `routes/sessions.js` | `GET /` (`?includeArchived=true` optional), `POST /`, `PATCH /:id`, `GET /:id/filters`, `PATCH /:id/complete`, `PATCH /:id/reopen`, `PATCH /:id/open`, `PATCH /:id/archive`, `PATCH /:id/restore`, `DELETE /:id` (permanent hard-delete, available in the UI alongside Archive — see "Hard delete" below) | login required; ownership/role checks per route (see the table above and "Archive / restore" below) |
 | `/api/datasets` | `routes/datasets.js` | `GET /` (list of active datasets) | public (metadata only) |
-| `/api/tables` | `routes/tables.js` | `GET /`, `GET /:name/columns`, `GET /:name/preview` | scoped to the session's dataset schema |
+| `/api/tables` | `routes/tables.js` | `GET /`, `GET /:name/columns`, `GET /:name/preview` | login required; if `?sessionId=` is given, re-authorized via `canAccessStudent` against that session's owner (admin any; mentor own or assigned student's; student only their own) — 404 if the session doesn't exist, 403 if not authorized. No `sessionId` falls back to the default academic schema (still requires login) |
 | `/api/query` | `routes/query.js` | `POST /` (Run Query / playground) | **login always required**, regardless of `taskId` — see "Known risks" below |
 | `/api/tasks` | `routes/tasks.js` | `GET /categories`, `GET /`, `GET /:id`, `GET /:id/solution` (login required), `POST /:id/check` | see check-answer flow below |
 | `/api/progress` | `routes/progress.js` | `GET /summary`, `GET /tasks-status` | login required; `?targetUserId=` re-authorized via `canAccessStudent` |
@@ -339,6 +339,7 @@ npm run test:progress-read-for-user  # ?targetUserId= on the progress routes
 npm run test:query-tasks-authz       # auth requirements on /api/query and /api/tasks/:id/check
 npm run test:query-limits            # row limit + timeout
 npm run test:solution-authz          # GET /api/tasks/:id/solution requires login
+npm run test:tables-authz            # GET /api/tables* requires login + canAccessStudent when sessionId is given
 npm run test:mentor-assignments-schema  # mentor_assignments schema + created_by_user_id migration
 npm run test:mentor-assignments-api     # admin CRUD on /api/mentor-assignments
 npm run test:mentor-students            # GET /api/mentor/students(/summary, /:id/sessions) — mentor-only scoping, assigned-vs-unassigned, admin access to sessions, archived sessions included

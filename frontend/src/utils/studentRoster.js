@@ -1,4 +1,10 @@
 import { api } from '../api';
+import { formatDateShort } from './formatDate';
+
+// Re-exported so existing importers (MyStudentsView, MentorOverviewView)
+// keep working unchanged — the canonical implementation now lives in
+// utils/formatDate.js, shared with ProgressView.
+export { formatDateShort };
 
 // Compact per-student stats shared by MyStudentsView (mentor's own roster)
 // and MentorOverviewView (admin reviewing a mentor's roster) — both need the
@@ -17,12 +23,4 @@ export async function fetchStudentStats(studentId) {
     lastActivity: progress?.recentAttempts?.[0]?.createdAt ?? null,
     sessionCount: Array.isArray(sessions) ? sessions.length : 0,
   };
-}
-
-export function formatDateShort(iso) {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  const day   = String(d.getDate()).padStart(2, '0');
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  return `${day}.${month}.${d.getFullYear()}`;
 }

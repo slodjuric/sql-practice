@@ -1,0 +1,2444 @@
+openapi: 3.0.3
+
+info:
+  title: SQL Practice API
+  version: "1.0.0"
+  description: |
+    API for the SQL Practice app (interactive SQL tasks checked against a real
+    PostgreSQL database, sessions/learning plans, login/role system).
+
+    **This spec is hand-maintained, not generated from code.** It documents a
+    first, deliberately partial slice of the API (see "Phase 1" scope below) —
+    if anything here looks stale compared to the actual route code, trust the
+    code and update this file.
+
+    ### Authentication
+    This API uses a session cookie (`connect.sid`, set by `express-session` +
+    `connect-pg-simple`), **not** bearer tokens. To use "Try it out" below:
+    1. Call `POST /api/auth/login` with a real username/password — a valid
+       session cookie is stored by your browser automatically.
+    2. Every subsequent "Try it out" call from this same page reuses that
+       cookie automatically — no token to copy/paste anywhere.
+    3. Call `POST /api/auth/logout` to end the session.
+
+    This only works because Swagger UI is served by the backend itself
+    (same origin as `/api/*`) — see `src/routes/docs.js`.
+
+    ### Phase 1 scope
+    Only a first, "safe to explore" slice of the API is documented here:
+    health, auth, datasets, tasks (read + solution), the query sandbox, and
+    the table browser. Endpoints with heavier role/ownership matrices
+    (sessions, users, progress, mentor assignments, mentor students) are
+    intentionally left for a later pass — see `CLAUDE.md`'s route map for the
+    full API surface in the meantime.
+
+servers:
+  - url: http://localhost:3001
+    description: Local development
+
+tags:
+  - name: Health
+    description: Basic connectivity/health check.
+  - name: Auth
+    description: Login/logout and the current session's identity.
+  - name: Datasets
+    description: Practice datasets (academic/cinema/football/nation) metadata.
+  - name: Tasks
+    description: SQL practice tasks — listing, detail, and solutions.
+  - name: Query
+    description: Free-form SQL sandbox (Run Query / playground).
+  - name: Tables
+    description: Browse tables/columns/data for the active practice schema.
+  - name: Sessions
+    description: >-
+      Learning plans ("sessions") — create/edit/complete/reopen/archive/
+      restore/delete, with a three-role (admin/mentor/student) authorization
+      matrix per action. See each operation's description for exact rules —
+      they are NOT uniform across the group (e.g. complete/open are
+      self-only for every role, including admin/mentor).
+  - name: Progress
+    description: >-
+      Progress/attempt summaries for a session, with the same optional
+      targetUserId review-mode pattern used by Sessions.
+  - name: Users
+    description: >-
+      Admin-only user lifecycle management (list/create/delete, password
+      reset, role change) and the admin summary dashboard.
+  - name: Mentor Assignments
+    description: Admin-only management of mentor↔student links (who mentors whom).
+  - name: Mentor Students
+    description: >-
+      A mentor's own assigned-student roster and per-student session history.
+      Mostly mentor-only — notably NOT the same access pattern as
+      admin-oversight routes elsewhere (see each operation).
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: connect.sid
+      description: >-
+        Session cookie set by POST /api/auth/login. httpOnly, sameSite=lax,
+        secure in production. There is no bearer-token alternative.
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.
+      required: [error]
+      example:
+        error: "Not authenticated."
+
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        role:
+          type: string
+          enum: [admin, mentor, student]
+          description: >-
+            DB value is always one of these three. "mentor" is shown in the
+            frontend UI as "Professor" — the API value itself is unaffected.
+      required: [id, username, role]
+      example:
+        id: 1
+        username: default
+        role: student
+
+    Dataset:
+      type: object
+      properties:
+        id:
+          type: integer
+        key:
+          type: string
+          description: Stable identifier, e.g. "academic".
+        name:
+          type: string
+        schema_name:
+          type: string
+          description: PostgreSQL schema this dataset's tables live in.
+        description:
+          type: string
+          nullable: true
+        type:
+          type: string
+        is_active:
+          type: boolean
+      example:
+        id: 1
+        key: academic
+        name: Academic
+        schema_name: academic
+        description: Faculties, departments, professors, students, exams.
+        type: relational
+        is_active: true
+
+    Task:
+      type: object
+      description: >-
+        A practice task with its `solution` field stripped out. The solution
+        is only ever exposed via GET /api/tasks/{id}/solution.
+      properties:
+        id:
+          type: integer
+        datasetKey:
+          type: string
+        category:
+          type: string
+        topicId:
+          type: string
+          nullable: true
+        projectId:
+          type: string
+          nullable: true
+          description: Present instead of topicId for Practice Project tasks.
+        levelId:
+          type: string
+          enum: [introduction, beginner, intermediate, advanced, expert]
+        difficulty:
+          type: string
+          enum: [easy, medium, hard]
+        title:
+          type: string
+        description:
+          type: string
+        hint:
+          type: string
+        tables:
+          type: array
+          items:
+            type: string
+        requiresOrderBy:
+          type: boolean
+          nullable: true
+        validationMode:
+          type: string
+          enum: [strict, result_only]
+          nullable: true
+      example:
+        id: 1
+        datasetKey: academic
+        category: SELECT basics
+        topicId: select
+        levelId: introduction
+        difficulty: easy
+        title: Select all students
+        description: Show all columns and all rows from the students table.
+        hint: Use SELECT * and FROM students.
+        tables: [students]
+
+    QueryResult:
+      type: object
+      properties:
+        rows:
+          type: array
+          items:
+            type: object
+          description: One object per row, keyed by column name.
+        columns:
+          type: array
+          items:
+            type: string
+        rowCount:
+          type: integer
+      required: [rows, columns, rowCount]
+      example:
+        rows: [{ "?column?": 1 }]
+        columns: ["?column?"]
+        rowCount: 1
+
+    TableColumn:
+      type: object
+      properties:
+        column_name:
+          type: string
+        data_type:
+          type: string
+        is_nullable:
+          type: string
+          enum: [YES, NO]
+        column_default:
+          type: string
+          nullable: true
+      example:
+        column_name: id
+        data_type: integer
+        is_nullable: "NO"
+        column_default: null
+
+    TablePreview:
+      type: object
+      properties:
+        rows:
+          type: array
+          items:
+            type: object
+        columns:
+          type: array
+          items:
+            type: string
+        rowCount:
+          type: integer
+          description: Total row count in the table (not just the previewed page).
+      required: [rows, columns, rowCount]
+
+    AdminUser:
+      description: A user row as returned to an admin — never includes password_hash.
+      allOf:
+        - $ref: "#/components/schemas/User"
+        - type: object
+          properties:
+            created_at:
+              type: string
+              format: date-time
+      example:
+        id: 7
+        username: jane_student
+        role: student
+        created_at: "2026-01-15T09:30:00.000Z"
+
+    AdminSummary:
+      type: object
+      description: >-
+        Aggregated counts only — never raw per-user/per-session rows.
+        active_sessions/completed_sessions/archived_sessions are mutually
+        exclusive and sum to the total session count (archived is an
+        orthogonal lifecycle flag, not a 4th status value).
+      properties:
+        total_users: { type: integer }
+        admins: { type: integer }
+        mentors: { type: integer }
+        students: { type: integer }
+        active_sessions: { type: integer }
+        completed_sessions: { type: integer }
+        archived_sessions: { type: integer }
+        mentor_assignments: { type: integer }
+      example:
+        total_users: 12
+        admins: 1
+        mentors: 2
+        students: 9
+        active_sessions: 14
+        completed_sessions: 3
+        archived_sessions: 2
+        mentor_assignments: 5
+
+    Session:
+      type: object
+      description: >-
+        A learning plan row, enriched with read-only dataset + ownership
+        metadata (owner_username/owner_role, created_by_username,
+        archived_by_username — the latter two are null if never set, or if
+        that user was since deleted).
+      properties:
+        id: { type: integer }
+        user_id: { type: integer, description: "The session's owner." }
+        created_by_user_id: { type: integer, nullable: true }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        plan_type: { type: string, enum: [topic, category, project] }
+        status:
+          type: string
+          enum: [active, completed]
+          description: Completion state — orthogonal to archived_at (see below).
+        dataset_id: { type: integer, nullable: true }
+        archived_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: null = visible/normal session. Set = archived (hidden from the default list).
+        archived_by_user_id: { type: integer, nullable: true }
+        completed_at: { type: string, format: date-time, nullable: true }
+        last_opened_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        dataset_key: { type: string, nullable: true }
+        dataset_name: { type: string, nullable: true }
+        schema_name: { type: string, nullable: true }
+        dataset_type: { type: string, nullable: true }
+        owner_username: { type: string, nullable: true }
+        owner_role: { type: string, enum: [admin, mentor, student], nullable: true }
+        created_by_username: { type: string, nullable: true }
+        archived_by_username: { type: string, nullable: true }
+      example:
+        id: 42
+        user_id: 7
+        created_by_user_id: 7
+        name: "JOINs practice"
+        description: null
+        plan_type: topic
+        status: active
+        dataset_id: 1
+        archived_at: null
+        archived_by_user_id: null
+        completed_at: null
+        last_opened_at: "2026-07-01T10:00:00.000Z"
+        created_at: "2026-06-20T08:00:00.000Z"
+        dataset_key: academic
+        dataset_name: Academic
+        schema_name: academic
+        dataset_type: official
+        owner_username: jane_student
+        owner_role: student
+        created_by_username: jane_student
+        archived_by_username: null
+
+    SessionFilters:
+      type: object
+      properties:
+        planType: { type: string, enum: [topic, category, project] }
+        topics: { type: array, items: { type: string } }
+        difficulties: { type: array, items: { type: string } }
+        projects: { type: array, items: { type: string } }
+        categories: { type: array, items: { type: string } }
+      example:
+        planType: topic
+        topics: ["join", "subqueries"]
+        difficulties: ["easy", "medium"]
+        projects: []
+        categories: []
+
+    SessionWithFilters:
+      type: object
+      properties:
+        session: { $ref: "#/components/schemas/Session" }
+        filters: { $ref: "#/components/schemas/SessionFilters" }
+      required: [session, filters]
+
+    ProgressTaskStub:
+      type: object
+      properties:
+        id: { type: integer }
+        title: { type: string }
+        difficulty: { type: string, enum: [easy, medium, hard] }
+        levelId: { type: string }
+        topicId: { type: string, nullable: true }
+        status: { type: string, enum: [not_started, in_progress, solved] }
+
+    ProgressGroupStat:
+      type: object
+      description: One row per topic/category/project group, depending on the session's plan_type.
+      properties:
+        groupId: { type: string }
+        groupLabel: { type: string, nullable: true }
+        canNavigate: { type: boolean }
+        total: { type: integer }
+        solved: { type: integer }
+        inProgress: { type: integer }
+        notStarted: { type: integer }
+        tasks:
+          type: array
+          items: { $ref: "#/components/schemas/ProgressTaskStub" }
+
+    RecentAttempt:
+      type: object
+      description: Check Answer attempts only (Run Query attempts are excluded — is_correct IS NULL for those).
+      properties:
+        taskId: { type: integer }
+        taskTitle: { type: string }
+        category: { type: string }
+        topicId: { type: string, nullable: true }
+        isCorrect: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        submittedSql: { type: string, nullable: true }
+
+    ProgressSummary:
+      type: object
+      properties:
+        totalTasks: { type: integer }
+        solved: { type: integer }
+        inProgress: { type: integer }
+        attemptsCount: { type: integer }
+        planType: { type: string, enum: [topic, category, project] }
+        byGroup:
+          type: array
+          items: { $ref: "#/components/schemas/ProgressGroupStat" }
+        recentAttempts:
+          type: array
+          items: { $ref: "#/components/schemas/RecentAttempt" }
+        inProgressTasks:
+          type: array
+          items:
+            type: object
+            properties:
+              taskId: { type: integer }
+              taskTitle: { type: string }
+              category: { type: string }
+              topicId: { type: string, nullable: true }
+              difficulty: { type: string, enum: [easy, medium, hard] }
+
+    TaskStatusMap:
+      type: object
+      properties:
+        statuses:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [not_started, in_progress, solved]
+          description: Keyed by task id (as a string key in JSON).
+      example:
+        statuses: { "1": "solved", "4": "in_progress" }
+
+    MentorAssignment:
+      type: object
+      properties:
+        id: { type: integer }
+        mentor_id: { type: integer }
+        mentor_username: { type: string }
+        mentor_role: { type: string, enum: [mentor] }
+        student_id: { type: integer }
+        student_username: { type: string }
+        student_role: { type: string, enum: [student] }
+        created_at: { type: string, format: date-time }
+      example:
+        id: 3
+        mentor_id: 2
+        mentor_username: prof
+        mentor_role: mentor
+        student_id: 7
+        student_username: jane_student
+        student_role: student
+        created_at: "2026-05-01T12:00:00.000Z"
+
+    MentorStudentSummary:
+      type: object
+      properties:
+        id: { type: integer }
+        username: { type: string }
+        role: { type: string, enum: [student] }
+        assigned_at: { type: string, format: date-time }
+        active_sessions: { type: integer }
+        completed_sessions: { type: integer }
+        archived_sessions: { type: integer }
+        solved_count: { type: integer }
+        last_activity:
+          type: string
+          format: date-time
+          nullable: true
+          description: MAX(last_attempt_at) across ALL of the student's sessions (Run Query and Check Answer both count).
+
+    MentorStudentSession:
+      description: >-
+        A Session, plus a lightweight solved/attempted count for this
+        specific session (not a plan-scoped fraction — see the route
+        description for why).
+      allOf:
+        - $ref: "#/components/schemas/Session"
+        - type: object
+          properties:
+            solved_count: { type: integer }
+            attempted_count: { type: integer }
+
+    SampleDifference:
+      type: object
+      description: One differing row, capped at 3 per response (collectDiffs in resultComparator.js).
+      properties:
+        row:
+          type: integer
+          description: 1-based row index in the compared (sorted, if order doesn't matter) result set.
+        columns:
+          type: array
+          items: { type: string }
+          description: Lowercased column names that differ on this row.
+        userValues:
+          type: array
+          items: {}
+          description: The caller's values for `columns`, in the same order.
+        expectedValues:
+          type: array
+          items: {}
+          description: The solution's values for `columns`, in the same order.
+
+    CheckAnswerResult:
+      type: object
+      description: >-
+        The 200 response of POST /api/tasks/{id}/check. A single shared shape
+        rather than oneOf per failureReason — the fields that vary are all
+        optional, and `isCorrect`/`solutionHasJoin`/`userResult`/
+        `expectedRowCount` are always present regardless of outcome. See the
+        endpoint's examples for the concrete shape of each failureReason.
+      required: [isCorrect, solutionHasJoin, userResult, expectedRowCount]
+      properties:
+        isCorrect:
+          type: boolean
+        failureReason:
+          type: string
+          enum:
+            - column_count_mismatch
+            - column_name_mismatch
+            - row_count_mismatch
+            - order_mismatch
+            - duplicate_rows_mismatch
+            - value_mismatch
+            - query_logic_mismatch
+          description: >-
+            Key absent entirely (not just null) when isCorrect is true.
+            query_logic_mismatch is a distinct second pass (structural/ORDER
+            BY checks) that only runs after the result sets already matched —
+            see the endpoint description.
+        userColumns:
+          type: array
+          items: { type: string }
+          description: Only present for column_count_mismatch / column_name_mismatch.
+        expectedColumns:
+          type: array
+          items: { type: string }
+          description: Only present for column_count_mismatch / column_name_mismatch.
+        missingColumns:
+          type: array
+          items: { type: string }
+          description: Only present for column_count_mismatch — expected columns the caller's query is missing.
+        extraColumns:
+          type: array
+          items: { type: string }
+          description: Only present for column_count_mismatch — columns the caller's query has that the solution doesn't.
+        userRowCount:
+          type: integer
+          description: Only present for row_count_mismatch / order_mismatch / duplicate_rows_mismatch / value_mismatch.
+        sampleDifferences:
+          type: array
+          items: { $ref: "#/components/schemas/SampleDifference" }
+          description: Only present for order_mismatch / value_mismatch — up to 3 sample rows.
+        logicMismatchReason:
+          type: string
+          enum:
+            - missing_order_by
+            - extra_where_condition
+            - missing_where_condition
+            - condition_mismatch
+            - extra_distinct
+            - extra_order_by
+            - extra_limit
+          description: Only present for failureReason=query_logic_mismatch.
+        logicMismatchHint:
+          type: string
+          description: A human-readable hint paired with logicMismatchReason. Only present alongside it.
+        solutionHasJoin:
+          type: boolean
+          description: Always present — whether the solution SQL contains JOIN (case-insensitive substring check).
+        userResult:
+          type: object
+          description: Always present — the caller's own query result, echoed back for the UI to render.
+          properties:
+            rows: { type: array, items: { type: object } }
+            columns: { type: array, items: { type: string } }
+            rowCount: { type: integer }
+          required: [rows, columns, rowCount]
+        expectedRowCount:
+          type: integer
+          description: Always present — the solution's row count.
+
+security:
+  - sessionCookie: []
+
+paths:
+  /api/health:
+    get:
+      tags: [Health]
+      summary: Backend + database connectivity check
+      description: Pings the database with `SELECT 1`. No authentication required.
+      operationId: getHealth
+      security: []
+      x-visibility: public
+      responses:
+        "200":
+          description: Backend and database are both reachable.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+                  database: { type: string, enum: [connected] }
+              example:
+                status: ok
+                database: connected
+        "500":
+          description: Database is not reachable.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [error] }
+                  database: { type: string, description: Underlying error message. }
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in and start a session
+      description: >-
+        On success, regenerates the session (fixation mitigation) and sets
+        the `connect.sid` cookie. Returns the same generic error message
+        whether the username doesn't exist, has no password set yet, or the
+        password is wrong — this deliberately does not reveal which case
+        occurred.
+      operationId: login
+      security: []
+      x-visibility: public
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username: { type: string }
+                password: { type: string, format: password }
+              required: [username, password]
+            example:
+              username: default
+              password: change-me-please
+      responses:
+        "200":
+          description: Login succeeded; the session cookie is now set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          description: Missing username or password.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Invalid username or password (generic message either way).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error: "Invalid username or password."
+
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out and destroy the session
+      description: Destroys the server-side session and clears the `connect.sid` cookie.
+      operationId: logout
+      security: []
+      x-visibility: public
+      responses:
+        "200":
+          description: Session destroyed (idempotent even with no active session).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      summary: Get the currently logged-in user
+      description: >-
+        Reads `id`/`username`/`role` fresh from the database on every call
+        (nothing but `userId` is cached in the session) — a role change or
+        account deletion takes effect immediately on the next call.
+      operationId: getMe
+      x-visibility: authenticated
+      responses:
+        "200":
+          description: The authenticated user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401":
+          description: No active session, or the session's user no longer exists.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error: "Not authenticated."
+
+  /api/datasets:
+    get:
+      tags: [Datasets]
+      summary: List active practice datasets
+      description: Metadata only (no task content) for every dataset with `is_active = true`.
+      operationId: listDatasets
+      security: []
+      x-visibility: public
+      responses:
+        "200":
+          description: Active datasets.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Dataset" }
+
+  /api/tasks/categories:
+    get:
+      tags: [Tasks]
+      summary: List distinct task categories
+      description: Deduplicated `category` values across all datasets' tasks.
+      operationId: listTaskCategories
+      security: []
+      x-visibility: public
+      responses:
+        "200":
+          description: List of category names.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }
+              example: ["SELECT basics", "WHERE filtering", "JOIN"]
+
+  /api/tasks:
+    get:
+      tags: [Tasks]
+      summary: List tasks (optionally filtered)
+      description: >-
+        Returns tasks with their `solution` field stripped out. All filters
+        are optional and combine with AND.
+      operationId: listTasks
+      security: []
+      x-visibility: public
+      parameters:
+        - name: datasetKey
+          in: query
+          schema: { type: string }
+          example: academic
+        - name: category
+          in: query
+          schema: { type: string }
+        - name: topicId
+          in: query
+          schema: { type: string }
+          example: select
+        - name: levelId
+          in: query
+          schema:
+            type: string
+            enum: [introduction, beginner, intermediate, advanced, expert]
+        - name: projectId
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Matching tasks.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Task" }
+
+  /api/tasks/{id}:
+    get:
+      tags: [Tasks]
+      summary: Get a single task by id
+      description: Returns the task with its `solution` field stripped out.
+      operationId: getTask
+      security: []
+      x-visibility: public
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+          example: 1
+      responses:
+        "200":
+          description: The task.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Task" }
+        "404":
+          description: No task with this id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error: "Task not found"
+
+  /api/tasks/{id}/solution:
+    get:
+      tags: [Tasks]
+      summary: Get a task's solution SQL
+      description: >-
+        Requires login, but any authenticated role (admin/mentor/student) may
+        fetch a solution — there is no additional role gate. This is the
+        **only** route that ever returns solution SQL; everywhere else only
+        derived booleans (e.g. `solutionHasJoin`) are exposed.
+      operationId: getTaskSolution
+      x-visibility: authenticated
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+          example: 1
+      responses:
+        "200":
+          description: The task's solution SQL.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  solution: { type: string }
+                required: [solution]
+              example:
+                solution: "SELECT *\nFROM students;"
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: No task with this id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/tasks/{id}/check:
+    post:
+      tags: [Tasks]
+      summary: Check Answer — run SQL and compare it against the task's solution
+      description: >-
+        Runs `userSql` and the task's trusted solution SQL in parallel, then
+        compares the two result sets. This is the "Check Answer" button —
+        distinct from **Run Query** (POST /api/query), which only executes
+        SQL and never compares it to anything or updates progress.
+
+
+        **Request/response order is not what you'd expect — read this before
+        testing 401 in Swagger.** The checks run in this exact order: (1)
+        task lookup — 404 if missing; (2) `userSql` presence — 400 if
+        missing/blank; (3) authentication — 401. **A request with no
+        `userSql` gets 400, not 401, even if you are logged out** — you must
+        supply a non-empty `userSql` to actually observe the 401 case.
+
+
+        **sessionId behavior is more permissive than other routes, and does
+        NOT return 403 for an unauthorized session — read carefully:**
+        - Omitted (or empty/non-numeric): falls back to the caller's own
+          first non-archived session, same as most other session-aware
+          routes.
+        - A `sessionId` the caller does not own: **silently resolves to "no
+          session" (not an error, not a fallback to the caller's own
+          session)** — the check still runs and a result is still returned,
+          but nothing is persisted (see below) and the completed/archived
+          guard below never even runs, because it only runs when a session
+          was actually resolved. There is deliberately no 403 for "session
+          not yours" on this route, unlike GET /api/sessions or
+          PATCH /api/sessions/{id}.
+        - A `sessionId` the caller DOES own, that is completed or archived:
+          403, with the same messages PATCH-guarded routes use elsewhere.
+
+
+        **Attempt recording / progress side effects — only when a session
+        was actually resolved** (see above): every code path (safety
+        rejection, execution error, row-limit rejection, correct, incorrect)
+        writes one row to `task_attempts` (via `saveCheckAttempt`) AND
+        upserts `user_task_progress` for `(user, session, task)` — status
+        becomes `solved` on a correct answer (setting `solved_at` the first
+        time only) or `in_progress` on anything else (including safety/
+        execution failures), `attempts_count` increments, `last_attempt_at`/
+        `last_submitted_sql` update. **If no session was resolved (omitted
+        with no existing session, or an unauthorized sessionId as above),
+        neither table is written at all** — the response is still generated,
+        it just isn't persisted anywhere.
+
+
+        **Dataset scope**: the task must belong to the same dataset as the
+        resolved session (400 if not) — when no session is resolved, this
+        falls back to checking against the academic dataset.
+
+
+        **Correctness pipeline, in order:** (1) `validateSqlSafety` — SELECT/
+        WITH only, keyword blocklist (403 on failure); (2)
+        `validateSchemaScope` — blocks cross-dataset schema references (403);
+        (3) execute both queries in parallel — timeout (default 5s) or any
+        other DB error becomes 400; (4) row-limit check (default 1000 rows,
+        checked BEFORE comparison to avoid a false-positive match) — 400 if
+        exceeded; (5) `compareResults` — the main correctness check, several
+        possible `failureReason` values; (6) if the results already matched,
+        a SEPARATE structural pass can still flip a correct-looking answer to
+        `failureReason: query_logic_mismatch` — first `validateRequiredOrderBy`
+        (ORDER BY presence, always runs), then (only for `select`/`where`
+        topics, or any task with `validationMode: strict`)
+        `validateSqlStructure` (WHERE/DISTINCT/LIMIT/ORDER BY structural
+        checks — deliberately biased toward false negatives over false
+        positives, see `docs/check-answer-flow.md`).
+      operationId: checkTaskAnswer
+      x-visibility: authenticated
+      x-writes-attempt: true
+      x-updates-progress: true
+      x-practice-area: sql
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+          example: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userSql:
+                  type: string
+                  description: Must be a SELECT/WITH statement.
+                sessionId:
+                  type: integer
+                  nullable: true
+                  description: >-
+                    Optional. See the endpoint description for the
+                    non-obvious "unauthorized sessionId silently degrades to
+                    no session" behavior.
+              required: [userSql]
+            example:
+              userSql: "SELECT * FROM students;"
+              sessionId: 42
+      responses:
+        "200":
+          description: >-
+            Always returned once SQL safety/schema/execution/row-limit checks
+            pass — whether the answer was correct or not.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CheckAnswerResult" }
+              examples:
+                correct:
+                  summary: "A) Correct answer (task 1, live-verified)"
+                  value:
+                    isCorrect: true
+                    solutionHasJoin: false
+                    userResult:
+                      rows: [{ "id": 1, "first_name": "Ana", "last_name": "Kovač", "index_number": "2021001", "enrollment_year": 2021, "faculty_id": 1, "department_id": 1 }]
+                      columns: ["id", "first_name", "last_name", "index_number", "enrollment_year", "faculty_id", "department_id"]
+                      rowCount: 90
+                    expectedRowCount: 90
+                valueMismatch:
+                  summary: "B) Incorrect — result mismatch, wrong values (task 15, live-verified: e.grade + 1)"
+                  value:
+                    isCorrect: false
+                    failureReason: value_mismatch
+                    userRowCount: 160
+                    expectedRowCount: 160
+                    sampleDifferences:
+                      - row: 1
+                        columns: ["grade"]
+                        userValues: [11]
+                        expectedValues: [10]
+                      - row: 2
+                        columns: ["grade"]
+                        userValues: [11]
+                        expectedValues: [10]
+                      - row: 3
+                        columns: ["grade"]
+                        userValues: [11]
+                        expectedValues: [10]
+                    solutionHasJoin: true
+                    userResult:
+                      rows: [{ "first_name": "Ana", "last_name": "Kovač", "subject_name": "Databases", "grade": 11 }]
+                      columns: ["first_name", "last_name", "subject_name", "grade"]
+                      rowCount: 160
+                rowCountMismatch:
+                  summary: "Incorrect — row count mismatch (task 15, live-verified: added a restrictive WHERE)"
+                  value:
+                    isCorrect: false
+                    failureReason: row_count_mismatch
+                    userRowCount: 34
+                    expectedRowCount: 160
+                    solutionHasJoin: true
+                    userResult:
+                      rows: [{ "first_name": "Ana", "last_name": "Kovač", "subject_name": "Databases", "grade": 9 }]
+                      columns: ["first_name", "last_name", "subject_name", "grade"]
+                      rowCount: 34
+                columnMismatch:
+                  summary: "Incorrect — column count mismatch (task 15, live-verified: dropped the grade column)"
+                  value:
+                    isCorrect: false
+                    failureReason: column_count_mismatch
+                    userColumns: ["first_name", "last_name", "subject_name"]
+                    expectedColumns: ["first_name", "last_name", "subject_name", "grade"]
+                    missingColumns: ["grade"]
+                    extraColumns: []
+                    solutionHasJoin: true
+                    userResult:
+                      rows: [{ "first_name": "Ana", "last_name": "Kovač", "subject_name": "Databases" }]
+                      columns: ["first_name", "last_name", "subject_name"]
+                      rowCount: 160
+                    expectedRowCount: 160
+                orderMismatch:
+                  summary: "Incorrect — right rows, wrong sequence (task 7, live-verified: solution has ORDER BY, user omitted it)"
+                  value:
+                    isCorrect: false
+                    failureReason: order_mismatch
+                    userRowCount: 48
+                    expectedRowCount: 48
+                    sampleDifferences:
+                      - row: 1
+                        columns: ["id", "name", "ects", "faculty_id", "department_id"]
+                        userValues: [1, "Osnovi programiranja", 7, 1, 1]
+                        expectedValues: [33, "Matematička analiza 1", 8, 5, 14]
+                    solutionHasJoin: false
+                    userResult:
+                      rows: [{ "id": 1, "name": "Osnovi programiranja", "semester": 1, "ects": 7, "faculty_id": 1, "department_id": 1 }]
+                      columns: ["id", "name", "semester", "ects", "faculty_id", "department_id"]
+                      rowCount: 48
+                queryLogicMismatch:
+                  summary: >-
+                    Incorrect — right rows, but a stricter structural check still rejects it
+                    (task 1, live-verified: added "WHERE enrollment_year > 2000")
+                  value:
+                    isCorrect: false
+                    failureReason: query_logic_mismatch
+                    logicMismatchReason: extra_where_condition
+                    logicMismatchHint: "Check your WHERE clause — you may have added a condition that makes the result too restrictive."
+                    solutionHasJoin: false
+                    userResult:
+                      rows: [{ "id": 1, "first_name": "Ana", "last_name": "Kovač", "enrollment_year": 2021 }]
+                      columns: ["id", "first_name", "last_name", "enrollment_year"]
+                      rowCount: 90
+                    expectedRowCount: 90
+        "400":
+          description: Missing userSql, dataset/session mismatch, a DB execution error/timeout, or the result exceeds the row limit.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                missingSql:
+                  summary: userSql missing (returned even when logged out — see description)
+                  value: { error: "userSql is required." }
+                datasetMismatch:
+                  summary: Task's dataset does not match the resolved session's dataset
+                  value: { error: 'This task belongs to the "academic" dataset but your session uses "cinema".' }
+                timeout:
+                  summary: Query exceeded the statement timeout
+                  value: { error: "Your query exceeded the time limit of 5 seconds. Try a more specific query." }
+                rowLimit:
+                  summary: Result exceeds the row limit (checked before comparison)
+                  value: { error: "Your query returns more than 1000 rows. The expected result has 90 rows. Add a more specific filter or a LIMIT clause." }
+        "401":
+          description: "Not authenticated. Only reachable when userSql was provided — see the endpoint description."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error: "Not authenticated."
+        "403":
+          description: >-
+            SQL failed the safety/schema-scope check, or the resolved
+            session (one the caller actually owns) is completed or archived.
+            NOT returned for a sessionId the caller doesn't own — see the
+            endpoint description.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                unsafeSql:
+                  summary: SQL failed the safety check
+                  value: { error: "Only read-only SELECT queries are allowed. Detected: DELETE" }
+                crossSchema:
+                  summary: Cross-dataset schema reference
+                  value: { error: 'Cross-dataset query not allowed. Your session only has access to the "academic" dataset.' }
+                sessionCompleted:
+                  summary: The (owned) resolved session is completed
+                  value: { error: "This session is completed. Reopen it to continue." }
+                sessionArchived:
+                  summary: The (owned) resolved session is archived
+                  value: { error: "This session is archived. Restore it from the sidebar to continue." }
+        "404":
+          description: No task with this id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error: "Task not found"
+
+  /api/query:
+    post:
+      tags: [Query]
+      summary: Run a free-form SQL query (Run Query / playground)
+      description: >-
+        Always requires login, regardless of whether `taskId` is present —
+        this is the only endpoint that can execute arbitrary SQL. Only
+        SELECT/WITH is allowed (see `sqlSafetyValidator`); results over the
+        row limit (default 1000) or that exceed the statement timeout
+        (default 5s) are rejected before being returned. When `taskId` is
+        given, the attempt is recorded and the same session-status guards as
+        Check Answer apply (blocked if the session is completed/archived).
+      operationId: runQuery
+      x-visibility: authenticated
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sql:
+                  type: string
+                  description: Must be a SELECT/WITH statement.
+                taskId:
+                  type: integer
+                  nullable: true
+                  description: Optional — if set, this run is recorded as an attempt.
+                sessionId:
+                  type: integer
+                  nullable: true
+                  description: Optional — defaults to the caller's own first session.
+              required: [sql]
+            example:
+              sql: "SELECT 1"
+      responses:
+        "200":
+          description: Query executed successfully.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueryResult" }
+        "400":
+          description: Missing SQL, execution error, timeout, or result too large.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error: "Authentication required"
+        "403":
+          description: SQL failed the safety check (not a SELECT/WITH, or references another dataset's schema).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/tables:
+    get:
+      tags: [Tables]
+      summary: List tables in the active practice schema
+      description: >-
+        Requires login. If `sessionId` is given, the schema is resolved from
+        that session and re-authorized via `canAccessStudent` (admin: any;
+        mentor: their own or an assigned student's; student: only their own).
+        Without `sessionId`, falls back to the default academic schema.
+      operationId: listTables
+      x-visibility: authenticated
+      parameters:
+        - name: sessionId
+          in: query
+          schema: { type: integer }
+          description: Optional. Determines which dataset's schema to browse.
+      responses:
+        "200":
+          description: Table names in the resolved schema.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }
+              example: ["students", "exams", "professors"]
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Not authorized to view this session's tables.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: sessionId does not refer to an existing session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/tables/{tableName}/columns:
+    get:
+      tags: [Tables]
+      summary: Get column metadata for a table
+      description: Same auth/schema-resolution rules as GET /api/tables.
+      operationId: getTableColumns
+      x-visibility: authenticated
+      parameters:
+        - name: tableName
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-zA-Z_][a-zA-Z0-9_]*$" }
+          example: students
+        - name: sessionId
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Column metadata, in ordinal position order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/TableColumn" }
+        "400":
+          description: Invalid table name.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Not authorized to view this session's tables, or the table doesn't exist in the resolved schema.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: sessionId does not refer to an existing session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/tables/{tableName}/preview:
+    get:
+      tags: [Tables]
+      summary: Preview a table's data (first 50 rows + total count)
+      description: Same auth/schema-resolution rules as GET /api/tables.
+      operationId: getTablePreview
+      x-visibility: authenticated
+      parameters:
+        - name: tableName
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-zA-Z_][a-zA-Z0-9_]*$" }
+          example: students
+        - name: sessionId
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Up to 50 rows, plus the table's total row count.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TablePreview" }
+        "400":
+          description: Invalid table name.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Not authorized to view this session's tables, or the table doesn't exist in the resolved schema.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: sessionId does not refer to an existing session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions:
+    get:
+      tags: [Sessions]
+      summary: List sessions (learning plans)
+      description: >-
+        By default, returns the caller's own, NON-ARCHIVED sessions.
+        Students can only ever see their own. Mentors/admins can pass
+        `targetUserId` to view another authorized user's sessions (mentor:
+        only an assigned student; admin: any user) — re-checked server-side
+        via canAccessStudent regardless of what the client sends.
+        Archived sessions are hidden unless `includeArchived=true`.
+      operationId: listSessions
+      x-visibility: own, assigned-student, admin-any
+      parameters:
+        - name: targetUserId
+          in: query
+          schema: { type: integer }
+          description: Optional. Omitted = self. Requires canAccessStudent authorization otherwise.
+        - name: includeArchived
+          in: query
+          schema: { type: string, enum: ["true", "false", "1", "0"] }
+          description: "\"true\" or \"1\" also includes archived sessions."
+      responses:
+        "200":
+          description: The caller's (or authorized target's) sessions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Session" }
+        "400":
+          description: targetUserId is not a valid integer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: targetUserId given but not authorized (e.g. a mentor targeting an unassigned student).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+    post:
+      tags: [Sessions]
+      summary: Create a session (learning plan)
+      description: >-
+        **Students can never create a session, not even for themselves** —
+        canCreateSessionForUser rejects the student role outright, so this is
+        a blanket rule, not an ownership check. By default the new session is
+        owned by (and created by) the caller. A mentor/admin may pass
+        `targetUserId` in the body to create a session owned by another user
+        (e.g. a mentor setting up a plan for an assigned student) —
+        re-authorized server-side even when omitted (self-creation for a
+        student is blocked the exact same way).
+      operationId: createSession
+      x-required-role: mentor, admin (never student)
+      x-visibility: own, assigned-student, admin-any
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string, nullable: true }
+                planType: { type: string, enum: [topic, category, project], default: topic }
+                topics: { type: array, items: { type: string } }
+                difficulties: { type: array, items: { type: string } }
+                projects: { type: array, items: { type: string } }
+                categories: { type: array, items: { type: string } }
+                datasetId:
+                  type: integer
+                  nullable: true
+                  description: Defaults to the academic dataset if omitted/invalid.
+                targetUserId:
+                  type: integer
+                  nullable: true
+                  description: Optional. Omitted = self. Requires canCreateSessionForUser authorization otherwise.
+              required: [name]
+            example:
+              name: "JOINs practice"
+              planType: topic
+              topics: ["join"]
+              difficulties: ["easy", "medium"]
+      responses:
+        "201":
+          description: Session created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionWithFilters" }
+        "400":
+          description: Missing name, invalid targetUserId, or no active dataset found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: >-
+            Not permitted to create a session for the resolved owner — this
+            is the actual enforced rule for "students can never create a
+            session," including for themselves.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: targetUserId does not refer to an existing user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: A session with this name already exists for that owner.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{id}:
+    patch:
+      tags: [Sessions]
+      summary: Edit a session's name/description/plan (replaces filters)
+      description: >-
+        `dataset_id` is intentionally NOT editable after creation. Blanket
+        rule: **students can never edit a session, not even their own.**
+        Mentor/admin authorization is based on the session's own `user_id`
+        (fetched server-side), never on a client-sent targetUserId — mentor:
+        own or an assigned student's session; admin: any. Blocked (403) while
+        the session is archived — restore it first.
+      operationId: updateSession
+      x-required-role: mentor, admin (never student)
+      x-visibility: own, assigned-student, admin-any
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string, nullable: true }
+                planType: { type: string, enum: [topic, category, project], default: topic }
+                topics: { type: array, items: { type: string } }
+                difficulties: { type: array, items: { type: string } }
+                projects: { type: array, items: { type: string } }
+                categories: { type: array, items: { type: string } }
+              required: [name]
+      responses:
+        "200":
+          description: Session updated; filters fully replaced.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionWithFilters" }
+        "400":
+          description: Missing session name.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Caller is a student, not authorized for this session, or the session is archived.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                studentBlocked:
+                  value: { error: "You do not have permission to edit sessions." }
+                archived:
+                  value: { error: "This session is archived. Restore it before editing." }
+        "404":
+          description: Session not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: A session with this name already exists for that owner.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+    delete:
+      tags: [Sessions]
+      summary: "Permanently delete a session (maintenance-only, not the normal UI flow)"
+      description: >-
+        **Archive (PATCH /:id/archive) is the normal, restorable way to
+        remove a session — this route permanently destroys `task_attempts`,
+        `user_task_progress`, `learning_session_filters`, and the session row,
+        with no way to undo it.** Not called from anywhere in the frontend;
+        kept for direct API/maintenance use. Blanket rule: students can never
+        delete a session, not even their own. Mentor/admin authorization is
+        based on the session's own `user_id`: mentor own or an assigned
+        student's; admin any.
+      operationId: deleteSession
+      x-required-role: mentor, admin (never student)
+      x-visibility: own, assigned-student, admin-any
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Session and its attempts/progress/filters permanently deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean, enum: [true] } }
+        "400":
+          description: Invalid session id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Caller is a student, or not authorized for this session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Session not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{id}/filters:
+    get:
+      tags: [Sessions]
+      summary: Get a session's plan filters
+      description: >-
+        Authorization mirrors PATCH/DELETE /:id (canAccessStudent against
+        the session's own user_id): self always; admin always; mentor only
+        for their own or an assigned student's session.
+      operationId: getSessionFilters
+      x-visibility: own, assigned-student, admin-any
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: The session's current filters.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionFilters" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Not authorized to view this session's filters.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Session not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{id}/complete:
+    patch:
+      tags: [Sessions]
+      summary: Mark a session as completed
+      description: >-
+        **Self-only for every role, including admin/mentor** — this is
+        deliberately NOT a management action like edit/archive/delete; a
+        student legitimately completes their own session, and nobody
+        completes a session on someone else's behalf via this route (the
+        lookup is `WHERE user_id = actingUser.id`, not canAccessStudent).
+        Requires every task in the plan to have been run at least once
+        first. Blocked (403) while archived.
+      operationId: completeSession
+      x-visibility: own
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Session marked completed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "400":
+          description: Not every task in the plan has been run at least once yet.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error: "You cannot complete this session yet. Run every task at least once first."
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: The session is archived.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: "No session with this id owned by the caller (never another user's, even for admin/mentor)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{id}/reopen:
+    patch:
+      tags: [Sessions]
+      summary: Reopen a completed session back to active
+      description: >-
+        Authorization via canReopenSession: admin any session; mentor their
+        own or an assigned student's; **student never, not even their own**.
+        Privacy detail: a student targeting someone else's session id gets
+        404 (not 403) so they can't probe which ids exist — 403 only surfaces
+        once the target is confirmed to be their own session. If the session
+        is archived, this returns 403 pointing at restore instead (reopen is
+        completed→active; restore is archived→visible — an archived+completed
+        session needs both, restore then reopen).
+      operationId: reopenSession
+      x-required-role: mentor, admin (never student)
+      x-visibility: own, assigned-student, admin-any
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Session reopened (status back to active).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Caller (a student on their own session, or an unauthorized mentor) cannot reopen, or the session is archived.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                studentOwnSession:
+                  value: { error: "You do not have permission to reopen this session." }
+                archived:
+                  value: { error: "This session is archived. Restore it instead of reopening." }
+        "404":
+          description: "Session not found, or (student targeting another user's session) deliberately reported as 404 rather than 403."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{id}/open:
+    patch:
+      tags: [Sessions]
+      summary: "Mark a session as the owner's most-recently-opened (self-only)"
+      description: >-
+        Updates `last_opened_at`, the signal used to auto-pick a session on
+        the owner's next login. **Deliberately self-only for every role**
+        (ownership check only, never canAccessStudent) — a mentor/admin
+        reviewing another user's session must never overwrite that user's own
+        "resume" signal on their behalf; the frontend never calls this route
+        in a review-mode context for exactly this reason. Blocked (403) while
+        archived.
+      operationId: openSession
+      x-visibility: own
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: last_opened_at updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: The session is archived.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: "No session with this id owned by the caller (never another user's, even for admin/mentor)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{id}/archive:
+    patch:
+      tags: [Sessions]
+      summary: Archive a session (the normal, restorable way to remove it from view)
+      description: >-
+        Sets `archived_at`/`archived_by_user_id`. Hides the session from the
+        default GET /api/sessions list and blocks edit/complete/reopen/open
+        until restored — never touches task_attempts/user_task_progress/
+        learning_session_filters (unlike DELETE). Blanket rule: **students
+        can never archive a session, not even their own.** Mentor/admin via
+        canArchiveSession: mentor own or an assigned student's; admin any.
+      operationId: archiveSession
+      x-required-role: mentor, admin (never student)
+      x-visibility: own, assigned-student, admin-any
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Session archived.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Caller is a student, or not authorized for this session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Session not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/sessions/{id}/restore:
+    patch:
+      tags: [Sessions]
+      summary: Restore an archived session (reverses archive)
+      description: >-
+        Clears `archived_at`/`archived_by_user_id`. Does NOT change `status`
+        or `last_opened_at` — restoring never auto-resumes a session, the
+        user still has to explicitly select it afterward. Same authorization
+        as archive: students never; mentor own or an assigned student's;
+        admin any.
+      operationId: restoreSession
+      x-required-role: mentor, admin (never student)
+      x-visibility: own, assigned-student, admin-any
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Session restored (no longer archived).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Caller is a student, or not authorized for this session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Session not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/progress/summary:
+    get:
+      tags: [Progress]
+      summary: Get a progress/attempt summary for a session
+      description: >-
+        By default resolves progress for the caller. `targetUserId` lets an
+        admin/mentor view another authorized user's progress (mentor: only
+        an assigned student; admin: any), re-checked server-side via
+        canAccessStudent. `sessionId` is independently verified to actually
+        belong to the resolved owner (resolveSessionId) — a sessionId for a
+        different user never resolves, even if targetUserId itself was
+        authorized. If the owner has no sessions yet, returns a zeroed-out
+        summary scoped to the academic dataset's full task list.
+      operationId: getProgressSummary
+      x-visibility: own, assigned-student, admin-any
+      parameters:
+        - name: targetUserId
+          in: query
+          schema: { type: integer }
+          description: Optional. Omitted = self.
+        - name: sessionId
+          in: query
+          schema: { type: integer }
+          description: Optional. Omitted = the owner's first (non-archived) session.
+      responses:
+        "200":
+          description: Progress summary for the resolved session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProgressSummary" }
+        "400":
+          description: targetUserId is not a valid integer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: targetUserId given but not authorized.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/progress/tasks-status:
+    get:
+      tags: [Progress]
+      summary: Get a map of task id -> status for a session
+      description: >-
+        Same targetUserId/sessionId resolution rules as GET /api/progress/summary.
+        A lighter-weight endpoint than /summary — just the raw status map,
+        used e.g. to badge task list items without fetching the full summary.
+      operationId: getTasksStatus
+      x-visibility: own, assigned-student, admin-any
+      parameters:
+        - name: targetUserId
+          in: query
+          schema: { type: integer }
+        - name: sessionId
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Task status map for the resolved session (empty if the owner has no session).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskStatusMap" }
+        "400":
+          description: targetUserId is not a valid integer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: targetUserId given but not authorized.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/users:
+    get:
+      tags: [Users]
+      summary: List all users
+      description: Admin-only.
+      operationId: listUsers
+      x-required-role: admin
+      x-visibility: admin-any
+      responses:
+        "200":
+          description: All users, oldest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AdminUser" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+    post:
+      tags: [Users]
+      summary: Create a user
+      description: >-
+        Admin-only — account creation is an admin action, not public
+        self-registration. A password is required and hashed immediately, so
+        the account can log in right away (no separate CLI step needed).
+      operationId: createUser
+      x-required-role: admin
+      x-visibility: admin-any
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username: { type: string }
+                role:
+                  type: string
+                  enum: [admin, mentor, student]
+                  default: student
+                password:
+                  type: string
+                  format: password
+                  minLength: 8
+                  description: Minimum 8 characters (MIN_PASSWORD_LENGTH).
+              required: [username, password]
+            example:
+              username: new_student
+              role: student
+              password: at-least-8-chars
+      responses:
+        "201":
+          description: User created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminUser" }
+        "400":
+          description: Missing/invalid username, invalid role, missing or too-short password.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: Username already exists.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error: "Username already exists."
+
+  /api/users/admin-summary:
+    get:
+      tags: [Users]
+      summary: Admin dashboard aggregate counts
+      description: Admin-only. Aggregated totals only, never raw per-user/per-session rows.
+      operationId: getAdminSummary
+      x-required-role: admin
+      x-visibility: admin-any
+      responses:
+        "200":
+          description: Aggregate counts.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminSummary" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/users/{id}:
+    delete:
+      tags: [Users]
+      summary: Permanently delete a user
+      description: >-
+        Admin-only, permanent hard-delete — no soft-delete/archive for
+        accounts. **Guards against deleting the last remaining admin (400).**
+        Sessions OWNED by the deleted user (task_attempts,
+        user_task_progress, the session rows themselves) are permanently
+        deleted too. Sessions the user only CREATED for someone else (e.g. a
+        mentor's plan for a student) are untouched — only `created_by_user_id`
+        becomes NULL (ON DELETE SET NULL). `mentor_assignments` rows (as
+        either mentor or student) are cleaned up automatically at the DB
+        level (ON DELETE CASCADE) — no special code needed for that part.
+      operationId: deleteUser
+      x-required-role: admin
+      x-visibility: admin-any
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: User (and their owned sessions/progress) permanently deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean, enum: [true] } }
+        "400":
+          description: Invalid user id, or this is the last remaining admin.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error: "Cannot delete the last remaining admin."
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: User not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/users/{id}/password:
+    patch:
+      tags: [Users]
+      summary: Reset a user's password
+      description: >-
+        Admin-only. Works identically for a legacy user with a NULL
+        password_hash (no special-casing). **Also invalidates every active
+        session belonging to the TARGET user**, in the same transaction as
+        the password update — a stale, already-logged-in browser must not
+        keep working under the old password. If the admin resets their OWN
+        password, this also deletes the admin's own current session (the
+        same forced re-login as for any other user, deliberately no
+        self-exception) — their very next request will 401. Not hidden for
+        the admin's own row in the UI, since a reset is not destructive the
+        way delete is.
+      operationId: resetUserPassword
+      x-required-role: admin
+      x-visibility: admin-any
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                newPassword: { type: string, format: password, minLength: 8 }
+              required: [newPassword]
+      responses:
+        "200":
+          description: Password reset; all of the target's active sessions are now invalid.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer }
+                  username: { type: string }
+                  role: { type: string, enum: [admin, mentor, student] }
+        "400":
+          description: Invalid user id, missing/too-short new password.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: User not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/users/{id}/role:
+    patch:
+      tags: [Users]
+      summary: Change a user's role
+      description: >-
+        Admin-only. Takes effect immediately on the target's very next
+        request — role is never cached in the session payload
+        (getActingUser/GET /api/auth/me always re-read it from the DB), so
+        unlike a password reset, no session invalidation is needed here.
+        **Guards against demoting the last remaining admin (400), including
+        an admin demoting themselves** — same rule as DELETE /:id, no
+        self-exception. When a user LEAVES the mentor or student role, stale
+        `mentor_assignments` rows are cleaned up in the same transaction
+        (leaving mentor -> deletes rows where they were mentor_id; leaving
+        student -> deletes rows where they were student_id); the response's
+        `removedAssignments` reports how many. No cleanup is needed when a
+        user newly ENTERS mentor/student, since assignments are never created
+        for a user who doesn't already hold the matching role.
+      operationId: updateUserRole
+      x-required-role: admin
+      x-visibility: admin-any
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role: { type: string, enum: [admin, mentor, student] }
+              required: [role]
+      responses:
+        "200":
+          description: Role updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer }
+                  username: { type: string }
+                  role: { type: string, enum: [admin, mentor, student] }
+                  removedAssignments:
+                    type: integer
+                    description: Count of mentor_assignments rows deleted as a side effect of leaving mentor/student.
+              example:
+                id: 7
+                username: jane_student
+                role: mentor
+                removedAssignments: 0
+        "400":
+          description: Invalid user id, invalid role, or this is the last remaining admin being demoted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error: "Cannot change the role of the last remaining admin."
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: User not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/mentor-assignments:
+    get:
+      tags: [Mentor Assignments]
+      summary: List all mentor-student assignments
+      description: Admin-only. Joined with username/role for both sides; never selects password_hash.
+      operationId: listMentorAssignments
+      x-required-role: admin
+      x-visibility: admin-any
+      responses:
+        "200":
+          description: All assignments, ordered by mentor then student username.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/MentorAssignment" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+    post:
+      tags: [Mentor Assignments]
+      summary: Assign a mentor to a student
+      description: >-
+        Admin-only. `mentorId` must belong to a user with role "mentor",
+        `studentId` must belong to a user with role "student" (400
+        otherwise) — this immediately grants the mentor canAccessStudent
+        access to that student's sessions/progress (checked live on every
+        request, no caching). **Re-assigning an already-assigned pair is
+        treated as an idempotent success** (200 with the existing row), not
+        a 409 conflict — the desired end state already exists.
+      operationId: createMentorAssignment
+      x-required-role: admin
+      x-visibility: admin-any
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mentorId: { type: integer }
+                studentId: { type: integer }
+              required: [mentorId, studentId]
+      responses:
+        "200":
+          description: Assignment already existed — returned as-is (idempotent, not an error).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MentorAssignment" }
+        "201":
+          description: Assignment created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MentorAssignment" }
+        "400":
+          description: Missing mentorId/studentId, mentorId equals studentId, or the ids don't have the matching mentor/student role.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error: 'mentorId must belong to a user with role "mentor".'
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: mentorId or studentId does not refer to an existing user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/mentor-assignments/{id}:
+    delete:
+      tags: [Mentor Assignments]
+      summary: Remove a mentor-student assignment
+      description: >-
+        Admin-only. Deletes only the assignment row — never touches either
+        user account. **Immediately revokes the mentor's access** to that
+        student's sessions/progress on the mentor's very next request, since
+        canAccessStudent checks mentor_assignments live, with nothing cached.
+      operationId: deleteMentorAssignment
+      x-required-role: admin
+      x-visibility: admin-any
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Assignment removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean, enum: [true] } }
+        "400":
+          description: Invalid assignment id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Authenticated but not an admin.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Assignment not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/mentor/students:
+    get:
+      tags: [Mentor Students]
+      summary: List the caller's own assigned students
+      description: >-
+        **Mentor-only — deliberately excludes admin too** (an admin's own
+        "assigned roster" isn't a meaningful concept; admins already have
+        GET /api/mentor-assignments for full oversight). Always scoped to
+        `req.actingUser` — there is no targetUserId here, unlike most other
+        review-mode routes.
+      operationId: listMentorOwnStudents
+      x-required-role: mentor
+      x-visibility: own
+      responses:
+        "200":
+          description: The caller's assigned students.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: integer }
+                    username: { type: string }
+                    role: { type: string, enum: [student] }
+                    assigned_at: { type: string, format: date-time }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Authenticated but not a mentor (including admin).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/mentor/students/summary:
+    get:
+      tags: [Mentor Students]
+      summary: Aggregated per-student stats for the caller's own roster
+      description: >-
+        Mentor-only, same scope as GET /api/mentor/students (not admin). One
+        query for the whole roster (session counts, solved count, last
+        activity) instead of N-per-student round trips.
+      operationId: getMentorStudentsSummary
+      x-required-role: mentor
+      x-visibility: own
+      responses:
+        "200":
+          description: Per-student aggregated stats.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/MentorStudentSummary" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Authenticated but not a mentor (including admin).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/mentor/students/{studentId}/sessions:
+    get:
+      tags: [Mentor Students]
+      summary: Full session history (including archived) for one student
+      description: >-
+        Mentor (only if assigned, via canAccessStudent) or admin (always) —
+        the path param is never trusted alone, same re-authorization pattern
+        as every other targetUserId-style route. **Students are explicitly
+        blocked even for their own id** — this route is meant for
+        mentor/admin oversight, not self-viewing (use GET /api/sessions for
+        that). Unlike GET /api/sessions, this always includes archived
+        sessions — the point is a complete history, not "what to resume."
+        Each session carries a lightweight solved/attempted count (not a
+        plan-scoped fraction).
+      operationId: getMentorStudentSessions
+      x-visibility: assigned-student, admin-any
+      parameters:
+        - name: studentId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: The student's full session history, most recent first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/MentorStudentSession" }
+        "400":
+          description: Invalid student id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: "Caller is a student (even for their own id), or a mentor not assigned to this student."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }

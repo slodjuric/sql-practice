@@ -560,6 +560,27 @@ input:-webkit-autofill:active {
   line-height: 1.4;
 }
 
+/* ===== Review-task banner (reviewing another user's task, read-only) ===== */
+.task-review-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 13px 18px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 12px;
+  background: rgba(88, 166, 255, 0.12);
+  border: 1px solid rgba(88, 166, 255, 0.4);
+  color: var(--accent);
+}
+
+.task-review-banner .banner-icon {
+  font-size: 15px;
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+
 .task-active-badge {
   font-size: 10px;
   font-weight: 600;
@@ -1167,6 +1188,17 @@ input:-webkit-autofill:active {
 
 .btn-success:hover:not(:disabled) {
   background: rgba(63, 185, 80, 0.1);
+}
+
+.btn-danger {
+  background: var(--red);
+  color: #ffffff;
+  border-color: var(--red);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #ff6a61;
+  border-color: #ff6a61;
 }
 
 .btn-back {
@@ -2845,6 +2877,17 @@ input:-webkit-autofill:active {
   color: var(--red);
 }
 
+.login-notice {
+  margin: -4px 0 14px;
+  padding: 9px 12px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--accent);
+  background: rgba(88, 166, 255, 0.1);
+  border: 1px solid rgba(88, 166, 255, 0.3);
+}
+
 .login-submit {
   padding: 8px;
   background: var(--accent);
@@ -3347,4 +3390,95 @@ input:-webkit-autofill:active {
   font-weight: 600;
   color: var(--text-primary);
   margin-bottom: 2px;
+}
+
+/* ===== Confirm Modal (themed replacement for window.confirm) ===== */
+.confirm-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(1, 4, 9, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  padding: 16px;
+}
+
+.confirm-modal {
+  width: 100%;
+  max-width: 440px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+  padding: 20px 22px;
+}
+
+.confirm-modal--danger {
+  border-color: rgba(248, 81, 73, 0.4);
+}
+
+.confirm-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.confirm-modal-icon {
+  font-size: 18px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.confirm-modal-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.confirm-modal-message {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: pre-line;
+}
+
+.confirm-modal-details {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-line;
+}
+
+.confirm-modal-details--info {
+  background: rgba(88, 166, 255, 0.08);
+  border: 1px solid rgba(88, 166, 255, 0.3);
+  color: var(--text-secondary);
+}
+
+.confirm-modal-details--danger {
+  background: rgba(248, 81, 73, 0.08);
+  border: 1px solid rgba(248, 81, 73, 0.35);
+  color: var(--text-secondary);
+}
+
+.confirm-modal-error {
+  margin: 0 0 14px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--red);
+  background: rgba(248, 81, 73, 0.1);
+  border: 1px solid rgba(248, 81, 73, 0.35);
+}
+
+.confirm-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }

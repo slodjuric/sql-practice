@@ -7,6 +7,8 @@ import { PLAN_TOPICS, TOPIC_LABELS } from '../constants/topics';
 import { PLAN_DIFFICULTIES, PLAN_DIFFICULTY_OPTIONS, DIFFICULTY_CLASS } from '../constants/difficulties';
 import { PLAN_PROJECTS, PROJECT_LABELS } from '../constants/projects';
 import { roleLabel } from '../utils/roleLabels';
+import { formatDateShort } from '../utils/formatDate';
+import { isSessionCompleted } from '../utils/sessionStatus';
 
 function ProgressBar({ value, max, color = 'var(--accent)' }) {
   const pct = max === 0 ? 0 : Math.round((value / max) * 100);
@@ -24,14 +26,6 @@ function formatDate(iso) {
   const d = new Date(iso);
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) +
     ' ' + d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-}
-
-function formatDateShort(iso) {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  const day   = String(d.getDate()).padStart(2, '0');
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  return `${day}.${month}.${d.getFullYear()}`;
 }
 
 const PLAN_TYPE_OPTIONS = [
@@ -208,7 +202,7 @@ function SessionSummaryCard({ activeUser, viewedUser, activeSession, summary, se
   const recentAttempts = summary?.recentAttempts ?? [];
   const pct            = totalTasks === 0 ? 0 : Math.round((solved / totalTasks) * 100);
   const lastActivity   = recentAttempts[0]?.createdAt;
-  const isCompleted    = activeSession.status === 'completed';
+  const isCompleted    = isSessionCompleted(activeSession);
 
   const isOpen = open || isPlanEditOpen;
 
@@ -517,7 +511,7 @@ export default function ProgressView({ activeUser, viewedUser, targetUserId, act
   useEffect(() => {
     if (!autoOpenPlanEditor) return;
     if (!activeSession) return;
-    if (activeSession.status === 'completed') {
+    if (isSessionCompleted(activeSession)) {
       onAutoOpenPlanEditorConsumed?.();
       return;
     }
@@ -530,22 +524,37 @@ export default function ProgressView({ activeUser, viewedUser, targetUserId, act
     load();
   }
 
-  // Opening a task/attempt from review mode is safe to allow: Practice/
-  // TaskView never receive viewedUser/targetUserId, so every run/check this
-  // leads to is still hard-scoped to the acting (professor/admin) user's own
-  // account and session — never the reviewed student's. Only the reviewed
-  // student's task DATA is being inspected here, not acted on as them.
+  // Opening a task/attempt from review mode is safe to allow: run/check
+  // stay hard-scoped to the acting (professor/admin) user's own account and
+  // session no matter what — TaskView never accepts reviewContext as a
+  // write target, only as a read-only display context (see its handling of
+  // `reviewContext`). What DOES travel along in review mode is display
+  // context: the reviewed session's id/dataset/filters, so TaskView can
+  // correctly show "is this task in the STUDENT's plan" and preview the
+  // STUDENT's tables, instead of silently validating/previewing against the
+  // acting user's own unrelated current session (the bug this fixes — see
+  // the activeUser/viewedUser invariant in CLAUDE.md).
+  function buildReviewContext() {
+    if (!reviewMode) return null;
+    return {
+      sessionId: activeSession?.id ?? null,
+      datasetKey: activeSession?.dataset_key ?? null,
+      filters: sessionFilters,
+      username: viewedUser?.username ?? null,
+    };
+  }
+
   function handleOpenTask(taskId, topicId) {
     if (!taskId || !topicId) {
       console.warn('openTaskFromProgress: missing taskId or topicId');
       return;
     }
-    onOpenTask?.({ taskId, topicId });
+    onOpenTask?.({ taskId, topicId, reviewContext: buildReviewContext() });
   }
 
   function handleOpenAttempt(group, attempt) {
     if (!group.taskId || !group.topicId) return;
-    onOpenTask?.({ taskId: group.taskId, topicId: group.topicId, attemptSql: attempt.submittedSql || null });
+    onOpenTask?.({ taskId: group.taskId, topicId: group.topicId, attemptSql: attempt.submittedSql || null, reviewContext: buildReviewContext() });
   }
 
   if (!activeSession) {

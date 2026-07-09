@@ -4,6 +4,7 @@ import ResultTable from './ResultTable';
 import TablePreviewPanel from './TablePreviewPanel';
 import SqlEditor from './SqlEditor';
 import { getFriendlySqlErrorMessage } from '../utils/sqlErrorMessages';
+import { useTablePreviewTabs } from '../utils/useTablePreviewTabs';
 
 const DEFAULT_SQL = 'SELECT * FROM students LIMIT 10;';
 
@@ -21,37 +22,26 @@ export default function QueryPlayground({ tableToOpen, onTableOpened, activeUser
     if (saved !== null) setSql(saved);
   }, [activeUser?.id, activeSession?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const [openTabs, setOpenTabs] = useState([]);
-  const [activeTab, setActiveTab] = useState(null);
-  const [tableCache, setTableCache] = useState({});
-  const [previewVisible, setPreviewVisible] = useState(true);
+  // Table preview state — shared shape/bookkeeping with TaskView, see
+  // utils/useTablePreviewTabs.
+  const {
+    openTabs, activeTab, tableCache, previewVisible,
+    setActiveTab, setTableCache, setPreviewVisible,
+    resetTabs, openTab, closeTab,
+  } = useTablePreviewTabs(true);
 
   // Reset table preview state on session switch — different datasets can share a
   // table name (e.g. "countries" exists in both football and nation), so a cached
   // preview must never be reused across a session/schema change.
   useEffect(() => {
-    setOpenTabs([]);
-    setActiveTab(null);
-    setTableCache({});
-  }, [activeSession?.id]);
+    resetTabs();
+  }, [activeSession?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!tableToOpen) return;
-    setOpenTabs(prev => prev.includes(tableToOpen) ? prev : [...prev, tableToOpen]);
-    setActiveTab(tableToOpen);
-    setPreviewVisible(true);
+    openTab(tableToOpen);
     onTableOpened?.();
   }, [tableToOpen]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  function closeTab(tableName, e) {
-    e.stopPropagation();
-    const newTabs = openTabs.filter(t => t !== tableName);
-    setOpenTabs(newTabs);
-    if (activeTab === tableName) {
-      const idx = openTabs.indexOf(tableName);
-      setActiveTab(newTabs[Math.min(idx, newTabs.length - 1)] ?? null);
-    }
-  }
 
   async function runQuery() {
     if (!sql.trim()) return;

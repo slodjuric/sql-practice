@@ -3,6 +3,8 @@ import { api } from '../api';
 import { roleLabel } from '../utils/roleLabels';
 import PasswordField from './shared/PasswordField';
 import FormSelect from './FormSelect';
+import ConfirmModal from './shared/ConfirmModal';
+import { useConfirmDialog } from '../utils/useConfirmDialog';
 
 const ROLE_OPTIONS = ['student', 'mentor', 'admin'];
 const MIN_PASSWORD_LENGTH = 8;
@@ -34,7 +36,9 @@ const SUMMARY_CARD_ORDER = [
   'active_sessions', 'completed_sessions', 'archived_sessions', 'mentor_assignments',
 ];
 
-export default function UserManagementView({ activeUser, onReviewUser, onUserDeleted, onSelfRoleChanged }) {
+export default function UserManagementView({ activeUser, onReviewUser, onUserDeleted, onSelfRoleChanged, onSelfPasswordReset }) {
+  const { confirm, dialogProps } = useConfirmDialog();
+
   const [activeTab, setActiveTab] = useState('users');
 
   const [users, setUsers] = useState([]);
@@ -184,12 +188,16 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
   // "are you sure?", since the two outcomes (owned vs. merely-created data)
   // are easy to conflate.
   async function handleDeleteUser(user) {
-    const confirmed = window.confirm(
-      `Permanently delete "${user.username}" (${roleLabel(user.role)})?\n\n` +
-      `This cannot be undone. Any sessions, progress, and answer history OWNED by this account will be permanently deleted.\n\n` +
-      `Sessions this user only created on behalf of someone else will NOT be deleted — they remain with their original owner, just without a listed creator.` +
-      (user.role === 'mentor' ? `\n\nThis professor's student assignments will also be removed.` : '')
-    );
+    const confirmed = await confirm({
+      title: 'Delete user',
+      message: `Permanently delete "${user.username}" (${roleLabel(user.role)})?`,
+      details:
+        `This cannot be undone. Any sessions, progress, and answer history OWNED by this account will be permanently deleted.\n\n` +
+        `Sessions this user only created on behalf of someone else will NOT be deleted — they remain with their original owner, just without a listed creator.` +
+        (user.role === 'mentor' ? `\n\nThis professor's student assignments will also be removed.` : ''),
+      confirmLabel: 'Delete user',
+      variant: 'danger',
+    });
     if (!confirmed) return;
 
     setDeleteError(null);
@@ -222,6 +230,18 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
     setResetFormError(null);
   }
 
+  // PATCH /api/users/:id/password deletes every one of the target's active
+  // sessions in the same transaction (see backend/src/routes/users.js) —
+  // including, when the target is the acting admin themselves, the session
+  // this very request is running on. Left unhandled, the UI kept looking
+  // logged in while the backend could no longer resolve an acting user, so
+  // the next unrelated admin action surfaced a confusing "Acting user is
+  // required." instead of a clean re-login prompt. Self-reset is otherwise
+  // unrestricted (same as before — resetting a password isn't destructive,
+  // so there's no reason to hide this for your own row), it just ends in a
+  // full logout instead of a success banner, mirroring how self-role-change
+  // already handles the same "this action just invalidated my own access"
+  // situation via onSelfRoleChanged.
   async function handleResetPassword(user) {
     setResetFormError(null);
 
@@ -238,11 +258,19 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
       return;
     }
 
+    const isSelf = user.id === activeUser?.id;
+
     setResetSaving(true);
     try {
       await api.users.resetPassword(user.id, resetNewPassword);
-      setSuccessMessage(`Password reset for "${user.username}".`);
       closeResetForm();
+
+      if (isSelf) {
+        onSelfPasswordReset?.();
+        return;
+      }
+
+      setSuccessMessage(`Password reset for "${user.username}".`);
     } catch (err) {
       setResetFormError(err.message);
     } finally {
@@ -283,12 +311,35 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
     }
 
     const isSelf = user.id === activeUser?.id;
+    // Transitions into/out of 'admin' are the only role changes that touch
+    // the security perimeter (granting or revoking full administrative
+    // access) — mentor<->student stays unconfirmed here since it's already
+    // covered by the accurate, consequence-specific hints below. Backend
+    // last-admin protection (PATCH /api/users/:id/role) stays the sole
+    // authority on whether a demotion is actually allowed; this is only a
+    // confirmation gate, not a duplicate of that check.
+    const touchesAdmin = user.role === 'admin' || editRoleValue === 'admin';
+
     if (isSelf) {
-      const confirmed = window.confirm(
-        `You are changing your OWN role from ${roleLabel(user.role)} to ${roleLabel(editRoleValue)}.\n\n` +
-        `If you no longer have the Admin role, you will lose access to User Management immediately and be logged out so you can log back in with your new role.\n\n` +
-        `Continue?`
-      );
+      const confirmed = await confirm({
+        title: 'Change your own role',
+        message: `You are changing your OWN role from ${roleLabel(user.role)} to ${roleLabel(editRoleValue)}.`,
+        details: 'If you no longer have the Admin role, you will lose access to User Management immediately and be logged out so you can log back in with your new role.',
+        confirmLabel: 'Change role',
+        variant: 'danger',
+      });
+      if (!confirmed) return;
+    } else if (touchesAdmin) {
+      const details = editRoleValue === 'admin'
+        ? `This grants ${user.username} full administrative access — managing users, roles, mentor assignments, and every session/dataset in the app.`
+        : `This immediately removes ${user.username}'s administrative access. They will no longer be able to manage users, roles, or mentor assignments.`;
+      const confirmed = await confirm({
+        title: `Change role for ${user.username}`,
+        message: `Change ${user.username}'s role from ${roleLabel(user.role)} to ${roleLabel(editRoleValue)}?`,
+        details,
+        confirmLabel: 'Change role',
+        variant: 'danger',
+      });
       if (!confirmed) return;
     }
 
@@ -337,12 +388,31 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
     }
   }
 
-  async function handleRemove(assignmentId) {
+  // Removing an assignment takes effect immediately (canAccessStudent is
+  // re-derived live on every request, never cached) — the mentor loses
+  // access to this student's sessions/progress on their very next request.
+  // Not data-destructive (no sessions/progress are touched) and reversible
+  // via re-Assign, but with zero prior friction this was the easiest of the
+  // admin actions to trigger by accident, so it gets the same danger-variant
+  // confirmation as the genuinely destructive actions above.
+  async function handleRemove(assignment) {
+    const confirmed = await confirm({
+      title: 'Remove assignment',
+      message: `Remove the assignment between "${assignment.mentor_username}" (Professor) and "${assignment.student_username}" (Student)?`,
+      details:
+        `"${assignment.mentor_username}" will immediately lose access to ${assignment.student_username}'s sessions and progress.\n\n` +
+        `You can re-assign them later if needed.`,
+      confirmLabel: 'Remove assignment',
+      variant: 'danger',
+    });
+    if (!confirmed) return;
+
     setAssignmentsError(null);
-    setRemovingId(assignmentId);
+    setRemovingId(assignment.id);
     try {
-      await api.mentorAssignments.delete(assignmentId);
-      setAssignments(prev => prev.filter(a => a.id !== assignmentId));
+      await api.mentorAssignments.delete(assignment.id);
+      setAssignments(prev => prev.filter(a => a.id !== assignment.id));
+      setSuccessMessage(`Removed assignment between "${assignment.mentor_username}" and "${assignment.student_username}".`);
     } catch (err) {
       setAssignmentsError(err.message);
     } finally {
@@ -631,6 +701,12 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
                               />
                             </div>
 
+                            <div className="user-mgmt-hint">
+                              {u.id === activeUser?.id
+                                ? 'Changing your own password will sign you out immediately — you will need to log in again with the new password.'
+                                : 'Changing this password will sign the user out of all active sessions.'}
+                            </div>
+
                             {resetFormError && <div className="user-mgmt-error">{resetFormError}</div>}
 
                             <div className="user-mgmt-form-actions">
@@ -655,6 +731,8 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
 
       {activeTab === 'assignments' && (
         <div className="page-body">
+          {successMessage && <div className="user-mgmt-success">{successMessage}</div>}
+
           {!loading && mentors.length === 0 && (
             <div className="user-mgmt-hint">Create a Professor user before assigning students.</div>
           )}
@@ -716,7 +794,7 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
                   <button
                     type="button"
                     className="user-mgmt-cancel-btn user-mgmt-remove-btn"
-                    onClick={() => handleRemove(a.id)}
+                    onClick={() => handleRemove(a)}
                     disabled={removingId === a.id}
                   >
                     {removingId === a.id ? 'Removing…' : 'Remove'}
@@ -727,6 +805,8 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
           )}
         </div>
       )}
+
+      <ConfirmModal {...dialogProps} />
     </div>
   );
 }

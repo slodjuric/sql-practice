@@ -148,6 +148,15 @@ This script creates a temporary test database, walks through the full setup flow
 
 ---
 
+## API documentation (Swagger UI)
+
+With the backend running (`npm run dev` in `backend/`), open **[http://localhost:3001/api-docs](http://localhost:3001/api-docs)** for an interactive Swagger UI covering the entire API surface (health, auth, datasets, tasks including Check Answer, the query sandbox, the table browser, sessions/progress, admin user management, and mentor↔student assignments/roster) — see `backend/openapi/openapi.yaml`. Role/ownership rules (who can do what to whose data) are spelled out in each operation's description, not just its schema — read those for the trickier routes (e.g. session archive/complete/reopen, password reset, role change, `POST /api/tasks/:id/check`'s non-obvious sessionId/authentication-ordering behavior).
+
+- **Development-only by default** — `/api-docs` returns 404 whenever `NODE_ENV=production`. Set `ENABLE_API_DOCS=true`/`false` in `backend/.env` to force it on/off regardless of `NODE_ENV`.
+- **Auth uses the existing session cookie (`connect.sid`), not a bearer token.** To try a protected endpoint: call `POST /api/auth/login` from the Swagger page with a real username/password ("Try it out"), which sets the cookie in your browser; every subsequent "Try it out" call on that same page reuses it automatically. Call `POST /api/auth/logout` when done. This only works because Swagger UI is served by the backend itself (same origin as `/api/*`) — opening the docs through a different origin/port would not share the cookie.
+
+---
+
 ## Roles and permissions
 
 Three roles: **admin**, **mentor** (shown in the app as "Professor" — the DB value stays `mentor`), **student**.

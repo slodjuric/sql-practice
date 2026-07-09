@@ -119,6 +119,13 @@ export default function PracticeView({
   const [taskExecutionCache, setTaskExecutionCache] = useState({});
   const [initialAttemptSql,  setInitialAttemptSql]  = useState(null);
   const [taskOrigin,         setTaskOrigin]         = useState(null);
+  // Set only when the currently-open task was reached via practiceTarget
+  // carrying a reviewContext (i.e. opened from a REVIEWED user's Progress) —
+  // never set by the normal in-list openTask() below. Passed straight
+  // through to TaskView, which uses it purely for read-only display (in-plan
+  // check, table preview dataset); Run/Check there stay hard-scoped to
+  // activeSession/sessionFilters (the acting user's own) regardless.
+  const [taskReviewContext,  setTaskReviewContext]  = useState(null);
 
   // Load all tasks for the active session's dataset so group views can compute which cards have plan tasks.
   useEffect(() => {
@@ -159,7 +166,7 @@ export default function PracticeView({
   // ── Navigate to a task from the Progress dashboard ─────────
   useEffect(() => {
     if (!practiceTarget) return;
-    const { taskId, topicId, attemptSql, origin } = practiceTarget;
+    const { taskId, topicId, attemptSql, origin, reviewContext } = practiceTarget;
     onPracticeTargetConsumed?.(); // clear immediately so stale targets don't re-fire
     setTaskOrigin(origin ?? null);
 
@@ -175,6 +182,7 @@ export default function PracticeView({
     setSelectedItem(item);
     setSelectedTaskId(taskId);
     setInitialAttemptSql(attemptSql || null);
+    setTaskReviewContext(reviewContext ?? null);
   }, [practiceTarget]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Navigate to a category/project from the Progress dashboard ─
@@ -231,11 +239,16 @@ export default function PracticeView({
   function openTask(id) {
     setSelectedTaskId(id);
     setTaskOrigin(null);
+    // Always a normal, non-review open (clicked directly from this task
+    // list) — clears any reviewContext left over from a previous task
+    // opened via practiceTarget, so it never leaks into an unrelated task.
+    setTaskReviewContext(null);
     onTaskEnter?.();
   }
 
   function closeTask() {
     setSelectedTaskId(null);
+    setTaskReviewContext(null);
     onTaskExit?.();
     loadStatuses(); // refresh statuses after returning from a task
   }
@@ -251,9 +264,15 @@ export default function PracticeView({
   if (selectedTaskId) {
     return (
       <>
-        {viewedUser && (
+        {/* Only shown when viewedUser is set but THIS task isn't a
+            reviewContext task (e.g. the mentor navigated to Practice
+            directly while still reviewing someone, and is now practicing in
+            their own plan) — TaskView renders its own, more specific
+            review banner whenever taskReviewContext is set, so the two
+            never show at once or contradict each other. */}
+        {viewedUser && !taskReviewContext && (
           <div className="practice-review-notice">
-            You are reviewing <strong>{viewedUser.username}</strong>. Running or checking here affects only your own account, not this student.
+            You are reviewing <strong>{viewedUser.username}</strong>. This Practice view — including the task list and any Run/Check actions — always uses your own account and session, never this student's.
           </div>
         )}
         <TaskView
@@ -278,6 +297,7 @@ export default function PracticeView({
           onProgressInvalidate={onProgressInvalidate}
           origin={taskOrigin}
           onBackToProgress={onBackToProgress}
+          reviewContext={taskReviewContext}
         />
       </>
     );
