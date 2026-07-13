@@ -2,7 +2,9 @@ import { useState, useEffect, Fragment } from 'react';
 import { api } from '../api';
 import { roleLabel } from '../utils/roleLabels';
 import ConfirmModal from './shared/ConfirmModal';
+import SortableTh from './shared/SortableTh';
 import { useConfirmDialog } from '../utils/useConfirmDialog';
+import { useSortableRows } from '../utils/useSortableRows';
 import AdminSummaryCards from './user-management/AdminSummaryCards';
 import CreateUserForm from './user-management/CreateUserForm';
 import RoleEditForm from './user-management/RoleEditForm';
@@ -372,6 +374,13 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
   const mentors = users.filter(u => u.role === 'mentor');
   const students = users.filter(u => u.role === 'student');
 
+  // This is the account list (not a query result), so click-to-sort is safe
+  // here — see useSortableRows/SortableTh. Role sorts by its displayed label
+  // (e.g. "Professor"), not the raw admin/mentor/student DB value, so the
+  // visual order always matches what's on screen.
+  const { sortedRows: sortedUsers, sortKey: userSortKey, sortDir: userSortDir, requestSort: requestUserSort } =
+    useSortableRows(users, (u, key) => (key === 'role' ? roleLabel(u.role) : u[key]));
+
   return (
     <div className="user-mgmt-view">
       <div className="page-header">
@@ -431,9 +440,9 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
             <table className="result-table user-mgmt-table">
               <thead>
                 <tr>
-                  <th>Username</th>
-                  <th>Role</th>
-                  <th>Created</th>
+                  <SortableTh label="Username" sortKey="username" activeSortKey={userSortKey} sortDir={userSortDir} onSort={requestUserSort} />
+                  <SortableTh label="Role" sortKey="role" activeSortKey={userSortKey} sortDir={userSortDir} onSort={requestUserSort} />
+                  <SortableTh label="Created" sortKey="created_at" activeSortKey={userSortKey} sortDir={userSortDir} onSort={requestUserSort} />
                   <th></th>
                   <th></th>
                   <th></th>
@@ -441,7 +450,7 @@ export default function UserManagementView({ activeUser, onReviewUser, onUserDel
                 </tr>
               </thead>
               <tbody>
-                {users.map(u => (
+                {sortedUsers.map(u => (
                   <Fragment key={u.id}>
                     <tr>
                       <td>{u.username}</td>

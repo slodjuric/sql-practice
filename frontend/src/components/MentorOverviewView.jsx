@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { api } from '../api';
 import { roleLabel } from '../utils/roleLabels';
 import { fetchStudentStats, formatDateShort } from '../utils/studentRoster';
+import { useSortableRows } from '../utils/useSortableRows';
+import SortableTh from './shared/SortableTh';
 
 // Admin reviewing a Professor/Mentor: a professor's own owned sessions are
 // rarely meaningful (their job is managing students, not solving tasks), so
@@ -39,6 +41,15 @@ export default function MentorOverviewView({ mentor, onReviewStudent }) {
     return () => { cancelled = true; };
   }, [mentor.id]);
 
+  // This is a roster overview (not a query result), so click-to-sort is safe
+  // here — see useSortableRows/SortableTh. Role sorts by its displayed label,
+  // and "Solved / Total" sorts by the raw solved count.
+  const { sortedRows, sortKey, sortDir, requestSort } = useSortableRows(rows, (r, key) => {
+    if (key === 'role') return roleLabel(r.role);
+    if (key === 'solved') return r.solved;
+    return r[key];
+  });
+
   return (
     <div className="user-mgmt-view">
       <div className="page-header">
@@ -57,16 +68,16 @@ export default function MentorOverviewView({ mentor, onReviewStudent }) {
           <table className="result-table user-mgmt-table">
             <thead>
               <tr>
-                <th>Username</th>
-                <th>Role</th>
-                <th>Solved / Total</th>
-                <th>Sessions</th>
-                <th>Last activity</th>
+                <SortableTh label="Username" sortKey="username" activeSortKey={sortKey} sortDir={sortDir} onSort={requestSort} />
+                <SortableTh label="Role" sortKey="role" activeSortKey={sortKey} sortDir={sortDir} onSort={requestSort} />
+                <SortableTh label="Solved / Total" sortKey="solved" activeSortKey={sortKey} sortDir={sortDir} onSort={requestSort} />
+                <SortableTh label="Sessions" sortKey="sessionCount" activeSortKey={sortKey} sortDir={sortDir} onSort={requestSort} />
+                <SortableTh label="Last activity" sortKey="lastActivity" activeSortKey={sortKey} sortDir={sortDir} onSort={requestSort} />
                 <th></th>
               </tr>
             </thead>
             <tbody>
-              {rows.map(s => (
+              {sortedRows.map(s => (
                 <tr key={s.id}>
                   <td>{s.username}</td>
                   <td>{roleLabel(s.role)}</td>

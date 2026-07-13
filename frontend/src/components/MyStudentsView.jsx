@@ -2,6 +2,18 @@ import { useState, useEffect, Fragment } from 'react';
 import { api } from '../api';
 import { formatDateShort } from '../utils/studentRoster';
 import { isSessionCompleted } from '../utils/sessionStatus';
+import { useSortableRows } from '../utils/useSortableRows';
+import SortableTh from './shared/SortableTh';
+
+// Stable sort order for the derived session status column below — matches
+// how a reader would expect these to rank (active work first, then done,
+// then put away).
+const SESSION_STATUS_RANK = { active: 0, completed: 1, archived: 2 };
+
+function sessionStatusOf(session) {
+  if (session.archived_at) return 'archived';
+  return isSessionCompleted(session) ? 'completed' : 'active';
+}
 
 function SessionStatusCell({ session }) {
   if (session.archived_at) {
@@ -39,6 +51,15 @@ function StudentSessionsPanel({ student, onOpenSession }) {
     return () => { cancelled = true; };
   }, [student.id]);
 
+  // This is a session-history list (not a query result), so click-to-sort
+  // is safe here — see useSortableRows/SortableTh. Status sorts by rank
+  // (active/completed/archived), not alphabetically.
+  const { sortedRows, sortKey, sortDir, requestSort } = useSortableRows(sessions, (s, key) => {
+    if (key === 'status') return SESSION_STATUS_RANK[sessionStatusOf(s)];
+    if (key === 'solved_count') return s.solved_count;
+    return s[key];
+  });
+
   if (loading) return <div className="loading">Loading sessions…</div>;
   if (error) return <div className="user-mgmt-error">{error}</div>;
   if (sessions.length === 0) {
@@ -50,16 +71,16 @@ function StudentSessionsPanel({ student, onOpenSession }) {
       <table className="result-table student-sessions-table">
         <thead>
           <tr>
-            <th>Session</th>
-            <th>Dataset</th>
-            <th>Status</th>
-            <th>Created</th>
-            <th>Solved / Attempted</th>
+            <SortableTh label="Session" sortKey="name" activeSortKey={sortKey} sortDir={sortDir} onSort={requestSort} />
+            <SortableTh label="Dataset" sortKey="dataset_name" activeSortKey={sortKey} sortDir={sortDir} onSort={requestSort} />
+            <SortableTh label="Status" sortKey="status" activeSortKey={sortKey} sortDir={sortDir} onSort={requestSort} />
+            <SortableTh label="Created" sortKey="created_at" activeSortKey={sortKey} sortDir={sortDir} onSort={requestSort} />
+            <SortableTh label="Solved / Attempted" sortKey="solved_count" activeSortKey={sortKey} sortDir={sortDir} onSort={requestSort} />
             <th></th>
           </tr>
         </thead>
         <tbody>
-          {sessions.map(s => (
+          {sortedRows.map(s => (
             <tr key={s.id}>
               <td>{s.name}</td>
               <td>{s.dataset_name || '—'}</td>
@@ -102,6 +123,10 @@ export default function MyStudentsView({ onSelectStudent, onCreateSessionForStud
     return () => { cancelled = true; };
   }, []);
 
+  // This is a roster overview (not a query result), so click-to-sort is safe
+  // here — see useSortableRows/SortableTh.
+  const { sortedRows: sortedStudents, sortKey, sortDir, requestSort } = useSortableRows(students);
+
   return (
     <div className="user-mgmt-view">
       <div className="page-header">
@@ -121,20 +146,20 @@ export default function MyStudentsView({ onSelectStudent, onCreateSessionForStud
             <table className="result-table user-mgmt-table">
               <thead>
                 <tr>
-                  <th>Username</th>
-                  <th>Assigned</th>
-                  <th>Active</th>
-                  <th>Completed</th>
-                  <th>Archived</th>
-                  <th>Solved</th>
-                  <th>Last activity</th>
+                  <SortableTh label="Username" sortKey="username" activeSortKey={sortKey} sortDir={sortDir} onSort={requestSort} />
+                  <SortableTh label="Assigned" sortKey="assigned_at" activeSortKey={sortKey} sortDir={sortDir} onSort={requestSort} />
+                  <SortableTh label="Active" sortKey="active_sessions" activeSortKey={sortKey} sortDir={sortDir} onSort={requestSort} />
+                  <SortableTh label="Completed" sortKey="completed_sessions" activeSortKey={sortKey} sortDir={sortDir} onSort={requestSort} />
+                  <SortableTh label="Archived" sortKey="archived_sessions" activeSortKey={sortKey} sortDir={sortDir} onSort={requestSort} />
+                  <SortableTh label="Solved" sortKey="solved_count" activeSortKey={sortKey} sortDir={sortDir} onSort={requestSort} />
+                  <SortableTh label="Last activity" sortKey="last_activity" activeSortKey={sortKey} sortDir={sortDir} onSort={requestSort} />
                   <th></th>
                   <th></th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
-                {students.map(s => (
+                {sortedStudents.map(s => (
                   <Fragment key={s.id}>
                     <tr>
                       <td>{s.username}</td>

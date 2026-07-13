@@ -1,5 +1,7 @@
 import { useEffect } from 'react';
 import { api } from '../api';
+import { useSortableRows } from '../utils/useSortableRows';
+import SortableTh from './shared/SortableTh';
 
 const PREVIEW_LIMIT = 50;
 
@@ -87,7 +89,9 @@ export default function TablePreviewPanel({
               ))}
             </div>
             <div className="table-preview-body">
-              <TablePreviewData data={tableCache[activeTab]} />
+              {/* Keyed by activeTab so sort state resets when switching tabs —
+                  a sort key from one table's columns is meaningless on another. */}
+              <TablePreviewData key={activeTab} data={tableCache[activeTab]} />
             </div>
           </>
         )
@@ -97,6 +101,10 @@ export default function TablePreviewPanel({
 }
 
 function TablePreviewData({ data }) {
+  // This is a raw table preview (not a query result), so click-to-sort is
+  // safe here — see useSortableRows/SortableTh.
+  const { sortedRows, sortKey, sortDir, requestSort } = useSortableRows(data?.rows);
+
   if (!data || data.loading) {
     return <div className="table-preview-empty">Loading...</div>;
   }
@@ -110,10 +118,14 @@ function TablePreviewData({ data }) {
   return (
     <table className="result-table">
       <thead>
-        <tr>{data.columns.map(c => <th key={c}>{c}</th>)}</tr>
+        <tr>
+          {data.columns.map(c => (
+            <SortableTh key={c} label={c} sortKey={c} activeSortKey={sortKey} sortDir={sortDir} onSort={requestSort} />
+          ))}
+        </tr>
       </thead>
       <tbody>
-        {data.rows.map((row, i) => (
+        {sortedRows.map((row, i) => (
           <tr key={i}>
             {data.columns.map(c => (
               <td key={c}>

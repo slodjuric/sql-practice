@@ -1299,6 +1299,35 @@ input:-webkit-autofill:active {
   background: rgba(88, 166, 255, 0.05);
 }
 
+/* Clickable column headers for data-management tables (Table Preview,
+   Database browser, User Management, mentor rosters) — never applied to
+   SQL query result tables, which keep exactly the row order the query
+   returned. */
+.sortable-th {
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.sortable-th:hover {
+  color: var(--text-primary);
+}
+
+.sortable-th:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.sortable-th--active {
+  color: var(--text-primary);
+}
+
+.sort-arrow {
+  margin-left: 4px;
+  font-size: 9px;
+  color: var(--accent);
+}
+
 .null-value {
   color: var(--text-muted);
   font-style: italic;
@@ -2925,7 +2954,7 @@ input:-webkit-autofill:active {
 
 .user-mgmt-toolbar {
   display: flex;
-  justify-content: flex-end;
+  justify-content: flex-start;
   margin-bottom: 14px;
 }
 
