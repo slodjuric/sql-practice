@@ -6,6 +6,7 @@ const { resolveSessionId } = require('../utils/contextResolvers');
 const { matchesSessionFilters, getSessionFilters } = require('../utils/taskFilters');
 const { getDatasetBySessionId } = require('../utils/datasetResolver');
 const { getActingUser, resolveAuthorizedOwnerId } = require('../utils/authz');
+const { sendUnexpectedError } = require('../utils/requestLogger');
 
 // Resolves the targetUserId query param against actingUser, following the
 // same rule used by GET /api/sessions: omitted => self, present => must pass
@@ -181,7 +182,11 @@ router.get('/summary', async (req, res) => {
       inProgressTasks,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendUnexpectedError(req, res, err, {
+      route: 'GET /api/progress/summary',
+      sessionId: req.query.sessionId,
+      targetUserId: req.query.targetUserId,
+    });
   }
 });
 
@@ -213,7 +218,11 @@ router.get('/tasks-status', async (req, res) => {
 
     res.json({ statuses });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendUnexpectedError(req, res, err, {
+      route: 'GET /api/progress/tasks-status',
+      sessionId: req.query.sessionId,
+      targetUserId: req.query.targetUserId,
+    });
   }
 });
 

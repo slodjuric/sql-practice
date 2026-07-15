@@ -1433,6 +1433,58 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
 
   /api/sessions/{id}:
+    get:
+      tags: [Sessions]
+      summary: Read a single session (canonical single-session read)
+      description: >-
+        Reuses the same load-and-authorize pattern as PATCH/DELETE below:
+        fetch by id (404 if missing), then authorize via canAccessStudent —
+        self always allowed, admin always allowed, mentor only for their own
+        or an assigned student's session. **A student targeting someone
+        else's session gets 404, not 403** — anti-enumeration, matching
+        PATCH /:id/reopen's rule, so a student can't tell "doesn't exist"
+        apart from "exists but isn't mine" by probing ids. A denied mentor
+        still gets the standard 403. Returns the same flat, enriched shape as
+        the lifecycle mutation routes (complete/reopen/archive/restore), not
+        a raw, unenriched row.
+      operationId: getSession
+      x-visibility: own, assigned-student, admin-any
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: The session, enriched with dataset/owner/creator/archiver fields.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "400":
+          description: Invalid session id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Not authenticated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Caller is not authorized for this session (e.g. an unassigned mentor).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: >-
+            Session not found — either it genuinely doesn't exist, or the
+            caller is a student targeting a session that isn't theirs
+            (anti-enumeration: intentionally indistinguishable from
+            "doesn't exist").
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
     patch:
       tags: [Sessions]
       summary: Edit a session's name/description/plan (replaces filters)

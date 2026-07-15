@@ -12,6 +12,7 @@ if (!SESSION_SECRET) {
 }
 
 const pgSession = require('connect-pg-simple')(session);
+const { requestContext, sendUnexpectedError } = require('./utils/requestLogger');
 const tablesRouter = require('./routes/tables');
 const queryRouter = require('./routes/query');
 const tasksRouter = require('./routes/tasks');
@@ -29,6 +30,11 @@ const initDb = require('./initDb');
 const app = express();
 const PORT = process.env.PORT || 3001;
 const SESSION_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000; // 14 days, rolling
+
+// Registered first so every request — including one that fails before
+// reaching a route (e.g. a malformed JSON body) — gets a request id and an
+// X-Request-ID response header.
+app.use(requestContext);
 
 app.use(cors());
 app.use(express.json());
@@ -68,11 +74,27 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
-// Global JSON error handler — must be registered after all routes
-// Without this, Express sends HTML error pages which the frontend can't parse
+// Global JSON error handler — must be registered after all routes.
+// Without this, Express sends HTML error pages which the frontend can't
+// parse. In normal operation this is a pure safety net: every route below
+// handles its own errors (see utils/requestLogger.js's sendUnexpectedError)
+// and never calls next(err), so this only fires for something Express
+// itself raises before reaching a route — e.g. a malformed JSON body from
+// express.json(), which carries its own 4xx status. That's a client error,
+// not an unexpected server failure, so it keeps its original status; only a
+// missing/5xx status is treated as unexpected and gets the generic 500.
 app.use((err, req, res, next) => {
-  console.error('[Unhandled error]', err.message);
-  res.status(err.status || 500).json({ error: err.message || 'Internal server error.' });
+  const knownClientStatus = (err.status || err.statusCode);
+  if (knownClientStatus >= 400 && knownClientStatus < 500) {
+    console.warn('Client request error', {
+      requestId: req.requestId,
+      userId: req.session?.userId ?? null,
+      status: knownClientStatus,
+      message: err.message,
+    });
+    return res.status(knownClientStatus).json({ error: 'Invalid request.' });
+  }
+  sendUnexpectedError(req, res, err, { route: 'global-error-handler' });
 });
 
 initDb()

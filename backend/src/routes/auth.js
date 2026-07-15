@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const pool = require('../db');
+const { sendUnexpectedError, logServerError } = require('../utils/requestLogger');
 
 // Same generic message whether the username doesn't exist, has no password
 // set yet, or the password is simply wrong — avoids leaking which accounts
@@ -33,19 +34,25 @@ router.post('/login', async (req, res) => {
 
     // Regenerate the session on login to prevent session fixation.
     req.session.regenerate(err => {
-      if (err) return res.status(500).json({ error: 'Login failed. Please try again.' });
+      if (err) {
+        logServerError(req, err, { route: 'POST /api/auth/login (session.regenerate)' });
+        return res.status(500).json({ error: 'Login failed. Please try again.' });
+      }
       req.session.userId = user.id;
       res.json({ id: user.id, username: user.username, role: user.role });
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendUnexpectedError(req, res, err, { route: 'POST /api/auth/login' });
   }
 });
 
 // POST /api/auth/logout
 router.post('/logout', (req, res) => {
   req.session.destroy(err => {
-    if (err) return res.status(500).json({ error: 'Logout failed. Please try again.' });
+    if (err) {
+      logServerError(req, err, { route: 'POST /api/auth/logout (session.destroy)' });
+      return res.status(500).json({ error: 'Logout failed. Please try again.' });
+    }
     res.clearCookie('connect.sid');
     res.json({ success: true });
   });
@@ -73,7 +80,7 @@ router.get('/me', async (req, res) => {
 
     res.json(user);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendUnexpectedError(req, res, err, { route: 'GET /api/auth/me' });
   }
 });
 

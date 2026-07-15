@@ -10,6 +10,25 @@ const ROW_LIMIT = parseInt(process.env.QUERY_ROW_LIMIT, 10) || 1000;
 // Configurable via QUERY_TIMEOUT_MS env var; defaults to 5 000 ms.
 const QUERY_TIMEOUT = parseInt(process.env.QUERY_TIMEOUT_MS, 10) || 5000;
 
+// pool.connect() now has an explicit connectionTimeoutMillis (see db.js), so
+// a saturated pool rejects instead of waiting forever — but a plain pg-pool
+// timeout error ("timeout exceeded when trying to connect") has no .code,
+// which would otherwise fall through tasks.js/query.js's `err.code ===
+// '57014' ? <friendly timeout> : err.message` and get shown to the user
+// verbatim, as if it were their own query's fault. Marking it here lets
+// those callers route it to a generic 500 instead. The original error is
+// kept as `.cause` for server-side logging, never sent to the client.
+async function acquireClient() {
+  try {
+    return await pool.connect();
+  } catch (err) {
+    const wrapped = new Error('Unable to acquire a database connection.');
+    wrapped.isPoolAcquisitionFailure = true;
+    wrapped.cause = err;
+    throw wrapped;
+  }
+}
+
 // Executes user-submitted SQL on a dedicated pool connection with a
 // statement_timeout guard and search_path scoped to the dataset schema.
 //
@@ -23,7 +42,7 @@ const QUERY_TIMEOUT = parseInt(process.env.QUERY_TIMEOUT_MS, 10) || 5000;
 // Does NOT enforce ROW_LIMIT internally — callers check result.rowCount after
 // the call so they can produce context-specific error messages.
 async function executeUserQuery(sql, schemaName = 'academic') {
-  const client = await pool.connect();
+  const client = await acquireClient();
   try {
     await client.query(`SET statement_timeout = ${QUERY_TIMEOUT}`);
     await client.query(`SET search_path = ${schemaName}, pg_catalog`);
@@ -40,7 +59,7 @@ async function executeUserQuery(sql, schemaName = 'academic') {
 // No timeout guard — solution SQL is authored by the developer and is trusted.
 // Uses a dedicated client so search_path is isolated and reset after the query.
 async function executeSolutionQuery(sql, schemaName = 'academic') {
-  const client = await pool.connect();
+  const client = await acquireClient();
   try {
     await client.query(`SET search_path = ${schemaName}, pg_catalog`);
     return await client.query(sql);

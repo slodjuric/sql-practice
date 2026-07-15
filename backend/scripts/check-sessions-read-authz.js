@@ -1,8 +1,15 @@
 'use strict';
 
 /**
- * Authorization layer verification for GET /api/sessions and
- * GET /api/sessions/:id/filters (Step 6e-3a — session read routes only).
+ * Authorization layer verification for GET /api/sessions,
+ * GET /api/sessions/:id/filters, and GET /api/sessions/:id (Step 6e-3a —
+ * session read routes only).
+ *
+ * GET /:id authorization (cases 18-25): shares its rule with GET /:id/filters
+ * (canAccessStudent), except a student targeting someone else's session gets
+ * 404 instead of 403 — anti-enumeration, matching PATCH /:id/reopen's rule —
+ * so a student can't tell "doesn't exist" apart from "exists but isn't mine"
+ * by probing ids. A denied mentor still gets the existing 403.
  *
  * Spins up a minimal in-process Express app (session middleware + the auth
  * router + the sessions router, mounted the same way as in src/index.js) on
@@ -380,6 +387,114 @@ async function run() {
         pass('17', 'No password_hash or unexpected username-shaped field ever leaks from GET /api/sessions');
       } else {
         fail('17', 'GET /api/sessions must never leak password_hash or unrelated user fields', `noPasswordLeak=${noPasswordLeak}, onlyAllowlisted=${onlyAllowlistedUsernameKeys}`);
+      }
+    }
+
+    // ── GET /api/sessions/:id (canonical single-session read) ────────────────
+    // Reuses the same authz fixtures set up above (filtersMentor/Student/
+    // UnassignedMentor/Admin, and the plain unrelated userA/userB pair) —
+    // this route shares its authorization rule with GET /:id/filters
+    // (canAccessStudent), except a student targeting someone else's session
+    // gets 404 instead of 403 (anti-enumeration, same as PATCH /:id/reopen).
+
+    // ── Case 18: invalid (non-numeric) id returns 400 ─────────────────────────
+    {
+      const { cookie } = await login(base, userAUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/not-a-number`, { headers: { Cookie: cookie } });
+      const body = await res.json();
+      if (res.status === 400 && body.error === 'Invalid session id.') {
+        pass('18', 'GET /:id with a non-numeric id returns 400');
+      } else {
+        fail('18', 'GET /:id with a non-numeric id must return 400', `status=${res.status}, body=${JSON.stringify(body)}`);
+      }
+    }
+
+    // ── Case 19: nonexistent session returns 404 ──────────────────────────────
+    {
+      const { cookie } = await login(base, userAUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/999999999`, { headers: { Cookie: cookie } });
+      if (res.status === 404) {
+        pass('19', 'GET /:id for a nonexistent session returns 404');
+      } else {
+        fail('19', 'GET /:id for a nonexistent session must return 404', `status=${res.status}`);
+      }
+    }
+
+    // ── Case 20: a student can read their own session (200, enriched shape) ──
+    {
+      const { cookie } = await login(base, filtersStudentUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/${filtersStudentSessionId}`, { headers: { Cookie: cookie } });
+      const raw = await res.text();
+      const body = JSON.parse(raw);
+      const enriched = body.id === filtersStudentSessionId
+        && body.owner_username === filtersStudentUsername
+        && body.owner_role === 'student'
+        && 'dataset_key' in body
+        && !('session' in body) && !('filters' in body);
+      const noPasswordLeak = !/password/i.test(raw);
+      if (res.status === 200 && enriched && noPasswordLeak) {
+        pass('20', 'Student reading their own session gets 200 with the full enriched, flat shape (owner_username/dataset_key present, no wrapper, no leak)');
+      } else {
+        fail('20', 'Student must be able to read their own session with the enriched shape', `status=${res.status}, body=${JSON.stringify(body)}`);
+      }
+    }
+
+    // ── Case 21: a student reading another (unrelated) user's session gets ────
+    // 404, not 403 — anti-enumeration, same rule as PATCH /:id/reopen.
+    {
+      const { cookie } = await login(base, userAUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/${userBSession1}`, { headers: { Cookie: cookie } });
+      const body = await res.json();
+      if (res.status === 404 && body.error === 'Session not found.') {
+        pass('21', "Student reading another unrelated user's session gets 404 (anti-enumeration), not 403");
+      } else {
+        fail('21', "Student reading another user's session must return 404, not reveal it exists via 403", `status=${res.status}, body=${JSON.stringify(body)}`);
+      }
+    }
+
+    // ── Case 22: an assigned mentor can read the student's session (200) ─────
+    {
+      const { cookie } = await login(base, filtersMentorUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/${filtersStudentSessionId}`, { headers: { Cookie: cookie } });
+      const body = await res.json();
+      if (res.status === 200 && body.id === filtersStudentSessionId) {
+        pass('22', "Assigned mentor reading the student's session gets 200");
+      } else {
+        fail('22', "Assigned mentor must be able to read an assigned student's session", `status=${res.status}, body=${JSON.stringify(body)}`);
+      }
+    }
+
+    // ── Case 23: an unassigned mentor is denied (existing denied behavior — ──
+    // 403, same as GET /:id/filters case 9, not the student-only 404 rule).
+    {
+      const { cookie } = await login(base, filtersUnassignedMentorUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/${filtersStudentSessionId}`, { headers: { Cookie: cookie } });
+      if (res.status === 403) {
+        pass('23', "Unassigned mentor reading the student's session gets 403 (existing denied behavior, not the student anti-enumeration 404)");
+      } else {
+        fail('23', 'Unassigned mentor must be denied with 403', `status=${res.status}`);
+      }
+    }
+
+    // ── Case 24: admin can read any session (200) ─────────────────────────────
+    {
+      const { cookie } = await login(base, filtersAdminUsername, TEST_PASSWORD);
+      const res = await fetch(`${sessionsBase}/${filtersStudentSessionId}`, { headers: { Cookie: cookie } });
+      const body = await res.json();
+      if (res.status === 200 && body.id === filtersStudentSessionId) {
+        pass('24', 'Admin reading any session gets 200');
+      } else {
+        fail('24', 'Admin must be able to read any session', `status=${res.status}, body=${JSON.stringify(body)}`);
+      }
+    }
+
+    // ── Case 25: unauthenticated request returns 401 ──────────────────────────
+    {
+      const res = await fetch(`${sessionsBase}/${filtersStudentSessionId}`);
+      if (res.status === 401) {
+        pass('25', 'Unauthenticated GET /:id returns 401');
+      } else {
+        fail('25', 'Unauthenticated GET /:id must return 401', `status=${res.status}`);
       }
     }
 

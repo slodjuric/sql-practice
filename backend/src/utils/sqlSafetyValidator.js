@@ -29,6 +29,103 @@ const BLOCKED_KEYWORDS = [
   'into',
 ];
 
+// Scans `sql` to decide whether it is a single statement — i.e. either no
+// semicolon at all, or exactly one semicolon that is the last non-whitespace
+// character (an optional trailing terminator). A second top-level semicolon,
+// or any non-whitespace content after the one allowed semicolon, means more
+// than one statement was submitted.
+//
+// This exists because queryRunner.js runs the raw SQL text through
+// node-postgres with no parameters, which uses the simple-query protocol —
+// the one wire-protocol path that executes multiple `;`-separated statements
+// in a single call. Without this check, something like
+// `SELECT 1; SET search_path TO other_schema;` passes every check above (no
+// blocked keyword — SET isn't one) and both statements actually run.
+//
+// A semicolon is only a statement separator when it appears outside a
+// single-quoted string literal, a double-quoted identifier, or a comment —
+// tracking "am I currently inside one of those" is exactly what a regex
+// can't safely express, so this is a small hand-written scanner instead.
+// Handles the SQL-standard escaping Postgres itself uses by default: `''`
+// inside a string literal is an escaped quote, `""` inside a quoted
+// identifier is an escaped quote, `-- ...` runs to end of line, `/* ... */`
+// nests (Postgres block comments do). Deliberately does not special-case
+// dollar-quoted strings ($$...$$) or backslash-escaped E'...' strings —
+// neither is relevant to the read-only SELECT/WITH queries this validator
+// allows through, and adding them would mean writing a real SQL tokenizer
+// for a case this validator otherwise never needs to distinguish.
+//
+// Returns { ok: true } or { ok: false, reason: string }.
+function checkSingleStatement(sql) {
+  const n = sql.length;
+  let i = 0;
+  let separatorIndex = -1; // index of the one allowed (optionally trailing) semicolon
+
+  while (i < n) {
+    const ch = sql[i];
+
+    // Line comment: -- through end of line.
+    if (ch === '-' && sql[i + 1] === '-') {
+      i += 2;
+      while (i < n && sql[i] !== '\n') i++;
+      continue;
+    }
+
+    // Block comment: /* ... */, nesting-aware.
+    if (ch === '/' && sql[i + 1] === '*') {
+      let depth = 1;
+      i += 2;
+      while (i < n && depth > 0) {
+        if (sql[i] === '/' && sql[i + 1] === '*') { depth++; i += 2; }
+        else if (sql[i] === '*' && sql[i + 1] === '/') { depth--; i += 2; }
+        else { i++; }
+      }
+      continue;
+    }
+
+    // Single-quoted string literal — '' is an escaped quote.
+    if (ch === "'") {
+      i++;
+      while (i < n) {
+        if (sql[i] === "'" && sql[i + 1] === "'") { i += 2; continue; }
+        if (sql[i] === "'") { i++; break; }
+        i++;
+      }
+      continue;
+    }
+
+    // Double-quoted identifier — "" is an escaped quote.
+    if (ch === '"') {
+      i++;
+      while (i < n) {
+        if (sql[i] === '"' && sql[i + 1] === '"') { i += 2; continue; }
+        if (sql[i] === '"') { i++; break; }
+        i++;
+      }
+      continue;
+    }
+
+    if (ch === ';') {
+      if (separatorIndex !== -1) {
+        // A second top-level semicolon, whether stacked statements
+        // (`SELECT 1; SELECT 2;`) or just a doubled terminator (`SELECT 1;;`).
+        return { ok: false, reason: 'Only one SQL statement is allowed.' };
+      }
+      separatorIndex = i;
+      i++;
+      continue;
+    }
+
+    i++;
+  }
+
+  if (separatorIndex !== -1 && sql.slice(separatorIndex + 1).trim() !== '') {
+    return { ok: false, reason: 'Only one SQL statement is allowed.' };
+  }
+
+  return { ok: true };
+}
+
 // Validate that a SQL string is safe to run in a read-only practice context.
 //
 // Returns { safe: true } or { safe: false, reason: string }.
@@ -54,6 +151,11 @@ function validateSqlSafety(sql) {
         reason: `Only read-only SELECT queries are allowed. Detected: ${keyword.toUpperCase()}`,
       };
     }
+  }
+
+  const singleStatement = checkSingleStatement(sql);
+  if (!singleStatement.ok) {
+    return { safe: false, reason: singleStatement.reason };
   }
 
   return { safe: true };

@@ -3,6 +3,7 @@ const router = express.Router();
 const pool = require('../db');
 const { getSchemaNameBySessionId } = require('../utils/datasetResolver');
 const { getActingUser, canAccessStudent } = require('../utils/authz');
+const { sendUnexpectedError } = require('../utils/requestLogger');
 
 const isValidTableName = (name) => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name);
 
@@ -73,7 +74,7 @@ router.get('/', async (req, res) => {
     );
     res.json(result.rows.map(r => r.table_name));
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendUnexpectedError(req, res, err, { route: 'GET /api/tables', sessionId: req.query.sessionId });
   }
 });
 
@@ -104,7 +105,11 @@ router.get('/:tableName/columns', async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendUnexpectedError(req, res, err, {
+      route: 'GET /api/tables/:tableName/columns',
+      sessionId: req.query.sessionId,
+      tableName,
+    });
   }
 });
 
@@ -140,7 +145,11 @@ router.get('/:tableName/preview', async (req, res) => {
       rowCount,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendUnexpectedError(req, res, err, {
+      route: 'GET /api/tables/:tableName/preview',
+      sessionId: req.query.sessionId,
+      tableName,
+    });
   }
 });
 

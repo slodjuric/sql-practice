@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db');
+const { sendUnexpectedError } = require('../utils/requestLogger');
 
 // GET /api/datasets
 router.get('/', async (req, res) => {
@@ -13,7 +14,7 @@ router.get('/', async (req, res) => {
     `);
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendUnexpectedError(req, res, err, { route: 'GET /api/datasets' });
   }
 });
 

@@ -13,6 +13,7 @@ const { compareResults } = require('../utils/resultComparator');
 const { validateSqlSafety, validateSchemaScope } = require('../utils/sqlSafetyValidator');
 const { executeUserQuery, executeSolutionQuery, ROW_LIMIT, QUERY_TIMEOUT } = require('../utils/queryRunner');
 const { getDatasetBySessionId, getAllDatasetSchemaNames } = require('../utils/datasetResolver');
+const { sendUnexpectedError } = require('../utils/requestLogger');
 
 // GET /api/tasks/categories
 router.get('/categories', (req, res) => {
@@ -115,6 +116,13 @@ router.post('/:id/check', async (req, res) => {
       executeSolutionQuery(task.solution, schemaName),
     ]);
   } catch (err) {
+    // Distinct from a genuine SQL error in the user's own query — the
+    // server couldn't get a DB connection at all, so this isn't the user's
+    // fault and shouldn't be shown to them as if their query were wrong.
+    if (err.isPoolAcquisitionFailure) {
+      await saveCheckAttempt(resolvedUserId, resolvedSessionId, task.id, userSql, null, 'Server was too busy to run this check. Please try again.');
+      return sendUnexpectedError(req, res, err, { route: 'POST /api/tasks/:id/check', sessionId: resolvedSessionId, taskId: task.id });
+    }
     const msg = err.code === '57014'
       ? `Your query exceeded the time limit of ${Math.round(QUERY_TIMEOUT / 1000)} seconds. Try a more specific query.`
       : err.message;

@@ -288,7 +288,7 @@ Detailed documentation: [`docs/check-answer-flow.md`](docs/check-answer-flow.md)
 ## Query safety limits
 
 `backend/src/utils/queryRunner.js` — `executeUserQuery(sql, schemaName)`:
-- Acquires a dedicated pool client.
+- Acquires a dedicated pool client (via `acquireClient()` — see below).
 - `SET statement_timeout = QUERY_TIMEOUT` (default: 5000ms, env: `QUERY_TIMEOUT_MS`).
 - `SET search_path = <schemaName>, pg_catalog`.
 - `finally` always resets both (`statement_timeout = 0`, `search_path = public, pg_catalog`) and releases the client.
@@ -298,7 +298,9 @@ Detailed documentation: [`docs/check-answer-flow.md`](docs/check-answer-flow.md)
 `/api/query`: row limit check → 400 error; timeout → 400 error.
 `/api/tasks/:id/check`: the row limit check fires **before** `compareResults` (prevents a false-positive match).
 
-Solution SQL always runs via `executeSolutionQuery` — no timeout (same `search_path`, no row limit since it's trusted).
+Solution SQL always runs via `executeSolutionQuery` — no timeout (same `search_path`, no row limit since it's trusted). **Check Answer deliberately still uses two separate dedicated clients** (one per function, run in parallel via `Promise.all` in `tasks.js`), not one shared client run sequentially — the SQL safety validator does not reject `;`-stacked statements, and a user-submitted `SELECT ...; SET search_path TO ...` (not blocked — `SET` isn't in the keyword blocklist) executed via `client.query()`'s simple-query protocol would otherwise be able to alter session state that persists onto a subsequent solution-query execution on the same connection. Two isolated clients contain that risk to the user's own query/result today; merging them would let it leak into the trusted solution's execution. Revisit this decision only alongside fixing the underlying statement-stacking gap in `sqlSafetyValidator.js`, not independently.
+
+**Connection pool** (`backend/src/db.js`): explicit `max`/`connectionTimeoutMillis`/`idleTimeoutMillis`, configurable via `DB_POOL_MAX` (default 10), `DB_CONNECTION_TIMEOUT_MS` (default 5000), `DB_IDLE_TIMEOUT_MS` (default 30000) — see `.env.example`. Before this, the pool had no explicit `connectionTimeoutMillis`, so a saturated pool (Check Answer alone uses 2 clients per request) made `pool.connect()` wait indefinitely rather than fail with a clear error. `queryRunner.js`'s `acquireClient()` wraps `pool.connect()` and marks a connection-acquisition failure with `.isPoolAcquisitionFailure = true` (message: "Unable to acquire a database connection.", no internal pg-pool text) — `tasks.js`/`query.js` check for that flag specifically and route it to the generic 500 (`sendUnexpectedError`) instead of the "your query has an error" 400 path both routes otherwise use for `err.message`.
 
 ## Verification scripts
 

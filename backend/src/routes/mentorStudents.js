@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db');
 const { requireRole, getActingUser, canAccessStudent } = require('../utils/authz');
+const { sendUnexpectedError } = require('../utils/requestLogger');
 
 // GET /api/mentor/students
 // Mentor-only (not admin — admin already manages assignments via
@@ -19,7 +20,7 @@ router.get('/students', requireRole('mentor'), async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendUnexpectedError(req, res, err, { route: 'GET /api/mentor/students' });
   }
 });
 
@@ -69,7 +70,7 @@ router.get('/students/summary', requireRole('mentor'), async (req, res) => {
     `, [req.actingUser.id]);
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendUnexpectedError(req, res, err, { route: 'GET /api/mentor/students/summary' });
   }
 });
 
@@ -134,7 +135,7 @@ router.get('/students/:studentId/sessions', async (req, res) => {
     `, [studentId]);
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendUnexpectedError(req, res, err, { route: 'GET /api/mentor/students/:studentId/sessions', studentId });
   }
 });
 

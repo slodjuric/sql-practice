@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api';
 import TaskView from './TaskView';
 import FormSelect from './FormSelect';
@@ -110,6 +110,10 @@ export default function PracticeView({
   const [selectedItem,      setSelectedItem]      = useState(null);
   const [tasks,             setTasks]             = useState([]);
   const [tasksLoading,      setTasksLoading]      = useState(false);
+  // Distinct from "tasks.length === 0" — that's a genuinely empty category;
+  // this is a failed request, which must never render the same empty-state
+  // placeholder (see loadTasks below).
+  const [tasksError,        setTasksError]        = useState(false);
   const [selectedTaskId,    setSelectedTaskId]    = useState(null);
   const [taskStatuses,      setTaskStatuses]      = useState({});
   const [statusFilter,      setStatusFilter]      = useState('all');
@@ -147,21 +151,43 @@ export default function PracticeView({
     if (selectedItem) loadStatuses();
   }, [selectedItem, loadStatuses]);
 
-  // ── Task loading (effect-driven so both manual and programmatic nav work) ──
-  useEffect(() => {
-    setStatusFilter('all'); // reset filter on every category change
+  // ── Task loading (effect-driven so both manual and programmatic nav work,
+  // and reusable directly for the "Try again" retry button below) ──────────
+  // A generation counter, not a boolean flag, so the exact same function can
+  // be called both by the category-change effect and by a later manual
+  // retry click without a second, duplicated implementation — whichever call
+  // is still current when a response arrives is the one allowed to apply it.
+  const taskLoadIdRef = useRef(0);
+
+  const loadTasks = useCallback(() => {
     if (!selectedItem || !selectedGroup?.filterKey) {
       setTasks([]);
+      setTasksError(false);
       return;
     }
-    let cancelled = false;
+    const loadId = ++taskLoadIdRef.current;
     setTasksLoading(true);
-    api.tasks.list({ [selectedGroup.filterKey]: selectedItem.id, datasetKey: activeSession?.dataset_key })
-      .then(data  => { if (!cancelled) setTasks(data.map((t, idx) => ({ ...t, _originalIdx: idx }))); })
-      .catch(()   => { if (!cancelled) setTasks([]); })
-      .finally(() => { if (!cancelled) setTasksLoading(false); });
-    return () => { cancelled = true; };
-  }, [selectedItem, activeSession?.dataset_key]); // intentionally reads selectedGroup from closure — they always update together
+    setTasksError(false);
+    return api.tasks.list({ [selectedGroup.filterKey]: selectedItem.id, datasetKey: activeSession?.dataset_key })
+      .then(data => {
+        if (taskLoadIdRef.current !== loadId) return;
+        setTasks(data.map((t, idx) => ({ ...t, _originalIdx: idx })));
+      })
+      .catch(() => {
+        if (taskLoadIdRef.current !== loadId) return;
+        setTasks([]);
+        setTasksError(true);
+      })
+      .finally(() => {
+        if (taskLoadIdRef.current !== loadId) return;
+        setTasksLoading(false);
+      });
+  }, [selectedItem, selectedGroup, activeSession?.dataset_key]);
+
+  useEffect(() => {
+    setStatusFilter('all'); // reset filter on every category change
+    loadTasks();
+  }, [selectedItem, activeSession?.dataset_key]); // eslint-disable-line react-hooks/exhaustive-deps -- intentionally reads selectedGroup/loadTasks from closure, same as before
 
   // ── Navigate to a task from the Progress dashboard ─────────
   useEffect(() => {
@@ -348,6 +374,13 @@ export default function PracticeView({
         <div className="page-body">
           {tasksLoading ? (
             <div className="loading">Loading</div>
+          ) : tasksError ? (
+            <div className="result-error">
+              ⚠ Failed to load tasks. Please try again.
+              <div style={{ marginTop: 12 }}>
+                <button className="btn btn-secondary" onClick={loadTasks}>Try again</button>
+              </div>
+            </div>
           ) : tasks.length === 0 ? (
             <div className="practice-placeholder">
               Tasks for <strong>{selectedItem.title}</strong> will be added in the next step.
@@ -419,7 +452,7 @@ export default function PracticeView({
                             </div>
                           </div>
                         </div>
-                        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+                        <div className="task-item-badges">
                           <StatusBadge status={status} />
                           {task.difficulty && (
                             <span className={`card-badge ${DIFFICULTY_CLASS[task.difficulty] || ''}`}>

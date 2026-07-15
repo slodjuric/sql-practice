@@ -6,6 +6,7 @@ const { validateSqlSafety, validateSchemaScope } = require('../utils/sqlSafetyVa
 const { executeUserQuery, ROW_LIMIT, QUERY_TIMEOUT } = require('../utils/queryRunner');
 const { getSchemaNameBySessionId, getAllDatasetSchemaNames } = require('../utils/datasetResolver');
 const { getActingUser } = require('../utils/authz');
+const { sendUnexpectedError } = require('../utils/requestLogger');
 
 // POST /api/query — run a SELECT query
 // userId always comes from the authenticated session — never from the client.
@@ -60,6 +61,13 @@ router.post('/', async (req, res) => {
   try {
     result = await executeUserQuery(sql, schemaName);
   } catch (err) {
+    // Distinct from a genuine SQL error in the user's own query — the
+    // server couldn't get a DB connection at all, so this isn't the user's
+    // fault and shouldn't be shown to them as if their query were wrong.
+    if (err.isPoolAcquisitionFailure) {
+      if (taskId) await saveRunAttempt(resolvedUserId, resolvedSessionId, taskId, sql, 'Server was too busy to run this query. Please try again.');
+      return sendUnexpectedError(req, res, err, { route: 'POST /api/query', sessionId: resolvedSessionId });
+    }
     errorMessage = err.code === '57014'
       ? `Your query exceeded the time limit of ${Math.round(QUERY_TIMEOUT / 1000)} seconds. Try a more specific query.`
       : err.message;

@@ -1023,6 +1023,23 @@ input:-webkit-autofill:active {
   color: var(--text-primary);
 }
 
+/* Status badge + difficulty badge on the right of each task row. Two fixed
+   columns (sized to the widest value each badge type can show — "in
+   progress" and "medium" — plus a little headroom) so the badges form
+   straight, stable columns across rows instead of drifting with each
+   badge's own text width; each badge stays right-aligned within its column. */
+.task-item-badges {
+  display: grid;
+  grid-template-columns: 84px 64px;
+  gap: 8px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.task-item-badges > * {
+  justify-self: end;
+}
+
 /* ===== Task View ===== */
 .task-view {
   display: flex;

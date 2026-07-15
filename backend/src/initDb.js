@@ -1,459 +1,486 @@
 const pool = require('./db');
 
+// Arbitrary fixed key for the startup-migration advisory lock — any bigint
+// works, it just has to be the same constant across every instance of this
+// app so they all contend for the exact same lock. Not tied to any
+// table/schema id.
+const INIT_DB_LOCK_KEY = 823951042;
+
 async function initDb() {
-  // Migration: drop legacy practice tables from public schema.
-  // These were moved to the academic schema (npm run db:init).
-  // Drop is safe and idempotent — CASCADE handles foreign-key order.
-  await pool.query(`
-    DROP TABLE IF EXISTS public.exams              CASCADE;
-    DROP TABLE IF EXISTS public.professor_subjects CASCADE;
-    DROP TABLE IF EXISTS public.students           CASCADE;
-    DROP TABLE IF EXISTS public.professors         CASCADE;
-    DROP TABLE IF EXISTS public.subjects           CASCADE;
-    DROP TABLE IF EXISTS public.departments        CASCADE;
-    DROP TABLE IF EXISTS public.faculties          CASCADE;
-  `);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-  // ── Datasets registry ────────────────────────────────────────────────────
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS datasets (
-      id          SERIAL PRIMARY KEY,
-      key         VARCHAR(50) UNIQUE NOT NULL,
-      name        TEXT NOT NULL,
-      schema_name VARCHAR(50) NOT NULL,
-      description TEXT,
-      type        VARCHAR(20) NOT NULL DEFAULT 'official',
-      is_active   BOOLEAN NOT NULL DEFAULT true,
-      created_by  INTEGER NULL,
-      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
+    // Prevents two backend instances started at the same time (e.g. a
+    // rolling deploy) from both passing a check-then-ALTER migration guard
+    // below before either has applied it. pg_advisory_xact_lock is
+    // transaction-scoped: it blocks a second instance's call until this
+    // transaction commits or rolls back, and Postgres releases it
+    // automatically at that point — including if this process dies
+    // mid-migration — so there's no separate unlock call and the lock can
+    // never be left permanently held.
+    await client.query('SELECT pg_advisory_xact_lock($1)', [INIT_DB_LOCK_KEY]);
 
-  await pool.query(`
-    INSERT INTO datasets (key, name, schema_name, description, type)
-    VALUES ('academic', 'Academic', 'academic',
-            'University practice dataset with faculties, departments, professors, subjects, students and exams',
-            'official')
-    ON CONFLICT (key) DO NOTHING
-  `);
+    // Migration: drop legacy practice tables from public schema.
+    // These were moved to the academic schema (npm run db:init).
+    // Drop is safe and idempotent — CASCADE handles foreign-key order.
+    await client.query(`
+      DROP TABLE IF EXISTS public.exams              CASCADE;
+      DROP TABLE IF EXISTS public.professor_subjects CASCADE;
+      DROP TABLE IF EXISTS public.students           CASCADE;
+      DROP TABLE IF EXISTS public.professors         CASCADE;
+      DROP TABLE IF EXISTS public.subjects           CASCADE;
+      DROP TABLE IF EXISTS public.departments        CASCADE;
+      DROP TABLE IF EXISTS public.faculties          CASCADE;
+    `);
 
-  // ── Users ────────────────────────────────────────────────────────────────
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id         SERIAL PRIMARY KEY,
-      username   VARCHAR(50) UNIQUE NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
+    // ── Datasets registry ────────────────────────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS datasets (
+        id          SERIAL PRIMARY KEY,
+        key         VARCHAR(50) UNIQUE NOT NULL,
+        name        TEXT NOT NULL,
+        schema_name VARCHAR(50) NOT NULL,
+        description TEXT,
+        type        VARCHAR(20) NOT NULL DEFAULT 'official',
+        is_active   BOOLEAN NOT NULL DEFAULT true,
+        created_by  INTEGER NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
 
-  // Migration: add role to users — existing rows default to 'student'.
-  await pool.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'student'
-  `);
-  await pool.query(`
-    UPDATE users SET role = 'student' WHERE role IS NULL
-  `);
+    await client.query(`
+      INSERT INTO datasets (key, name, schema_name, description, type)
+      VALUES ('academic', 'Academic', 'academic',
+              'University practice dataset with faculties, departments, professors, subjects, students and exams',
+              'official')
+      ON CONFLICT (key) DO NOTHING
+    `);
 
-  // Migration: enforce allowed role values
-  await pool.query(`
-    DO $$
-    BEGIN
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'users_role_valid'
-          AND conrelid = 'users'::regclass
-      ) THEN
-        ALTER TABLE users
-          ADD CONSTRAINT users_role_valid CHECK (role IN ('admin', 'mentor', 'student'));
-      END IF;
-    END $$;
-  `);
+    // ── Users ────────────────────────────────────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id         SERIAL PRIMARY KEY,
+        username   VARCHAR(50) UNIQUE NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
 
-  // Migration: add password_hash to users — nullable, no default, no backfill.
-  // Existing accounts stay password-less until set explicitly via
-  // scripts/set-user-password.js; real login does not exist yet.
-  await pool.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS password_hash TEXT
-  `);
+    // Migration: add role to users — existing rows default to 'student'.
+    await client.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'student'
+    `);
+    await client.query(`
+      UPDATE users SET role = 'student' WHERE role IS NULL
+    `);
 
-  await pool.query(`
-    INSERT INTO users (username) VALUES ('default')
-    ON CONFLICT (username) DO NOTHING
-  `);
+    // Migration: enforce allowed role values
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'users_role_valid'
+            AND conrelid = 'users'::regclass
+        ) THEN
+          ALTER TABLE users
+            ADD CONSTRAINT users_role_valid CHECK (role IN ('admin', 'mentor', 'student'));
+        END IF;
+      END $$;
+    `);
 
-  // ── Learning sessions ────────────────────────────────────────────────────
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS learning_sessions (
-      id             SERIAL PRIMARY KEY,
-      user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      name           TEXT NOT NULL,
-      description    TEXT,
-      status         TEXT NOT NULL DEFAULT 'active'
-                       CHECK (status IN ('active', 'completed')),
-      created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      completed_at   TIMESTAMPTZ,
-      last_opened_at TIMESTAMPTZ
-    )
-  `);
+    // Migration: add password_hash to users — nullable, no default, no backfill.
+    // Existing accounts stay password-less until set explicitly via
+    // scripts/set-user-password.js; real login does not exist yet.
+    await client.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS password_hash TEXT
+    `);
 
-  // Ensure every user has at least one session (idempotent)
-  await pool.query(`
-    INSERT INTO learning_sessions (user_id, name)
-    SELECT id, 'Default Session'
-    FROM users u
-    WHERE NOT EXISTS (
-      SELECT 1 FROM learning_sessions ls WHERE ls.user_id = u.id
-    )
-  `);
+    await client.query(`
+      INSERT INTO users (username) VALUES ('default')
+      ON CONFLICT (username) DO NOTHING
+    `);
 
-  // ── task_attempts ────────────────────────────────────────────────────────
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS task_attempts (
-      id            SERIAL PRIMARY KEY,
-      user_id       INTEGER NOT NULL REFERENCES users(id),
-      session_id    INTEGER REFERENCES learning_sessions(id) ON DELETE CASCADE,
-      task_id       INTEGER NOT NULL,
-      submitted_sql TEXT NOT NULL,
-      is_correct    BOOLEAN,
-      error_message TEXT,
-      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
+    // ── Learning sessions ────────────────────────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS learning_sessions (
+        id             SERIAL PRIMARY KEY,
+        user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name           TEXT NOT NULL,
+        description    TEXT,
+        status         TEXT NOT NULL DEFAULT 'active'
+                         CHECK (status IN ('active', 'completed')),
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at   TIMESTAMPTZ,
+        last_opened_at TIMESTAMPTZ
+      )
+    `);
 
-  // Migration: add session_id to pre-existing task_attempts table
-  await pool.query(`
-    ALTER TABLE task_attempts
-    ADD COLUMN IF NOT EXISTS session_id INTEGER REFERENCES learning_sessions(id) ON DELETE CASCADE
-  `);
+    // Ensure every user has at least one session (idempotent)
+    await client.query(`
+      INSERT INTO learning_sessions (user_id, name)
+      SELECT id, 'Default Session'
+      FROM users u
+      WHERE NOT EXISTS (
+        SELECT 1 FROM learning_sessions ls WHERE ls.user_id = u.id
+      )
+    `);
 
-  // Migration: link orphaned attempts to their user's first session
-  await pool.query(`
-    UPDATE task_attempts ta
-    SET session_id = (
-      SELECT ls.id
-      FROM learning_sessions ls
-      WHERE ls.user_id = ta.user_id
-      ORDER BY ls.created_at ASC
-      LIMIT 1
-    )
-    WHERE ta.session_id IS NULL
-  `);
+    // ── task_attempts ────────────────────────────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS task_attempts (
+        id            SERIAL PRIMARY KEY,
+        user_id       INTEGER NOT NULL REFERENCES users(id),
+        session_id    INTEGER REFERENCES learning_sessions(id) ON DELETE CASCADE,
+        task_id       INTEGER NOT NULL,
+        submitted_sql TEXT NOT NULL,
+        is_correct    BOOLEAN,
+        error_message TEXT,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
 
-  // ── user_task_progress ───────────────────────────────────────────────────
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS user_task_progress (
-      id                 SERIAL PRIMARY KEY,
-      user_id            INTEGER NOT NULL REFERENCES users(id),
-      session_id         INTEGER REFERENCES learning_sessions(id) ON DELETE CASCADE,
-      task_id            INTEGER NOT NULL,
-      status             VARCHAR(20) NOT NULL DEFAULT 'not_started'
-                           CHECK (status IN ('not_started', 'in_progress', 'solved')),
-      attempts_count     INTEGER NOT NULL DEFAULT 0,
-      last_submitted_sql TEXT,
-      last_attempt_at    TIMESTAMPTZ,
-      solved_at          TIMESTAMPTZ
-    )
-  `);
+    // Migration: add session_id to pre-existing task_attempts table
+    await client.query(`
+      ALTER TABLE task_attempts
+      ADD COLUMN IF NOT EXISTS session_id INTEGER REFERENCES learning_sessions(id) ON DELETE CASCADE
+    `);
 
-  // Migration: add session_id to pre-existing user_task_progress table
-  await pool.query(`
-    ALTER TABLE user_task_progress
-    ADD COLUMN IF NOT EXISTS session_id INTEGER REFERENCES learning_sessions(id) ON DELETE CASCADE
-  `);
+    // Migration: link orphaned attempts to their user's first session
+    await client.query(`
+      UPDATE task_attempts ta
+      SET session_id = (
+        SELECT ls.id
+        FROM learning_sessions ls
+        WHERE ls.user_id = ta.user_id
+        ORDER BY ls.created_at ASC
+        LIMIT 1
+      )
+      WHERE ta.session_id IS NULL
+    `);
 
-  // Migration: populate session_id for existing progress rows
-  await pool.query(`
-    UPDATE user_task_progress utp
-    SET session_id = (
-      SELECT ls.id
-      FROM learning_sessions ls
-      WHERE ls.user_id = utp.user_id
-      ORDER BY ls.created_at ASC
-      LIMIT 1
-    )
-    WHERE utp.session_id IS NULL
-  `);
+    // ── user_task_progress ───────────────────────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS user_task_progress (
+        id                 SERIAL PRIMARY KEY,
+        user_id            INTEGER NOT NULL REFERENCES users(id),
+        session_id         INTEGER REFERENCES learning_sessions(id) ON DELETE CASCADE,
+        task_id            INTEGER NOT NULL,
+        status             VARCHAR(20) NOT NULL DEFAULT 'not_started'
+                             CHECK (status IN ('not_started', 'in_progress', 'solved')),
+        attempts_count     INTEGER NOT NULL DEFAULT 0,
+        last_submitted_sql TEXT,
+        last_attempt_at    TIMESTAMPTZ,
+        solved_at          TIMESTAMPTZ
+      )
+    `);
 
-  // Migration: replace old UNIQUE(user_id, task_id) with UNIQUE(user_id, session_id, task_id)
-  await pool.query(`
-    DO $$
-    BEGIN
-      IF EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'user_task_progress_user_id_task_id_key'
-          AND conrelid = 'user_task_progress'::regclass
-      ) THEN
-        ALTER TABLE user_task_progress
-          DROP CONSTRAINT user_task_progress_user_id_task_id_key;
-      END IF;
+    // Migration: add session_id to pre-existing user_task_progress table
+    await client.query(`
+      ALTER TABLE user_task_progress
+      ADD COLUMN IF NOT EXISTS session_id INTEGER REFERENCES learning_sessions(id) ON DELETE CASCADE
+    `);
 
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'utp_user_session_task_unique'
-          AND conrelid = 'user_task_progress'::regclass
-      ) THEN
-        ALTER TABLE user_task_progress
-          ADD CONSTRAINT utp_user_session_task_unique UNIQUE (user_id, session_id, task_id);
-      END IF;
-    END $$;
-  `);
+    // Migration: populate session_id for existing progress rows
+    await client.query(`
+      UPDATE user_task_progress utp
+      SET session_id = (
+        SELECT ls.id
+        FROM learning_sessions ls
+        WHERE ls.user_id = utp.user_id
+        ORDER BY ls.created_at ASC
+        LIMIT 1
+      )
+      WHERE utp.session_id IS NULL
+    `);
 
-  // Migration: add plan_type to learning_sessions
-  await pool.query(`
-    ALTER TABLE learning_sessions
-    ADD COLUMN IF NOT EXISTS plan_type VARCHAR(20) DEFAULT 'topic'
-  `);
-  await pool.query(`
-    UPDATE learning_sessions SET plan_type = 'topic' WHERE plan_type IS NULL
-  `);
+    // Migration: replace old UNIQUE(user_id, task_id) with UNIQUE(user_id, session_id, task_id)
+    await client.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'user_task_progress_user_id_task_id_key'
+            AND conrelid = 'user_task_progress'::regclass
+        ) THEN
+          ALTER TABLE user_task_progress
+            DROP CONSTRAINT user_task_progress_user_id_task_id_key;
+        END IF;
 
-  // Migration: add dataset_id to learning_sessions
-  await pool.query(`
-    ALTER TABLE learning_sessions
-    ADD COLUMN IF NOT EXISTS dataset_id INTEGER REFERENCES datasets(id)
-  `);
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'utp_user_session_task_unique'
+            AND conrelid = 'user_task_progress'::regclass
+        ) THEN
+          ALTER TABLE user_task_progress
+            ADD CONSTRAINT utp_user_session_task_unique UNIQUE (user_id, session_id, task_id);
+        END IF;
+      END $$;
+    `);
 
-  // Backfill: assign all existing sessions to the academic dataset
-  await pool.query(`
-    UPDATE learning_sessions
-    SET dataset_id = (SELECT id FROM datasets WHERE key = 'academic')
-    WHERE dataset_id IS NULL
-  `);
+    // Migration: add plan_type to learning_sessions
+    await client.query(`
+      ALTER TABLE learning_sessions
+      ADD COLUMN IF NOT EXISTS plan_type VARCHAR(20) DEFAULT 'topic'
+    `);
+    await client.query(`
+      UPDATE learning_sessions SET plan_type = 'topic' WHERE plan_type IS NULL
+    `);
 
-  // Migration: replace old status CHECK ('active','locked') with ('active','completed')
-  await pool.query(`
-    DO $$
-    DECLARE
-      v_cname TEXT;
-    BEGIN
-      -- Drop old constraint (whichever name Postgres gave it)
-      SELECT cc.conname INTO v_cname
-      FROM pg_constraint cc
-      JOIN pg_attribute a
-        ON a.attnum = ANY(cc.conkey) AND a.attrelid = cc.conrelid
-      WHERE cc.conrelid = 'learning_sessions'::regclass
-        AND cc.contype = 'c'
-        AND a.attname = 'status'
-      LIMIT 1;
+    // Migration: add dataset_id to learning_sessions
+    await client.query(`
+      ALTER TABLE learning_sessions
+      ADD COLUMN IF NOT EXISTS dataset_id INTEGER REFERENCES datasets(id)
+    `);
 
-      IF v_cname IS NOT NULL THEN
-        EXECUTE format('ALTER TABLE learning_sessions DROP CONSTRAINT %I', v_cname);
-      END IF;
+    // Backfill: assign all existing sessions to the academic dataset
+    await client.query(`
+      UPDATE learning_sessions
+      SET dataset_id = (SELECT id FROM datasets WHERE key = 'academic')
+      WHERE dataset_id IS NULL
+    `);
 
-      -- Migrate legacy 'locked' rows BEFORE adding the new constraint,
-      -- because ADD CONSTRAINT validates all existing rows immediately.
-      UPDATE learning_sessions SET status = 'completed' WHERE status = 'locked';
+    // Migration: replace old status CHECK ('active','locked') with ('active','completed')
+    await client.query(`
+      DO $$
+      DECLARE
+        v_cname TEXT;
+      BEGIN
+        -- Drop old constraint (whichever name Postgres gave it)
+        SELECT cc.conname INTO v_cname
+        FROM pg_constraint cc
+        JOIN pg_attribute a
+          ON a.attnum = ANY(cc.conkey) AND a.attrelid = cc.conrelid
+        WHERE cc.conrelid = 'learning_sessions'::regclass
+          AND cc.contype = 'c'
+          AND a.attname = 'status'
+        LIMIT 1;
 
-      -- Add new constraint only after data is clean
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'ls_status_valid'
-          AND conrelid = 'learning_sessions'::regclass
-      ) THEN
-        ALTER TABLE learning_sessions
-          ADD CONSTRAINT ls_status_valid CHECK (status IN ('active', 'completed'));
-      END IF;
-    END $$;
-  `);
+        IF v_cname IS NOT NULL THEN
+          EXECUTE format('ALTER TABLE learning_sessions DROP CONSTRAINT %I', v_cname);
+        END IF;
 
-  // ── Backfill: reconcile user_task_progress from task_attempts ───────────────
-  // user_task_progress is the source of truth for current task status.
-  // This migration ensures any gaps or stale attempts_counts are fixed on startup.
-  // ON CONFLICT: preserves solved status, syncs attempts_count to the true count,
-  //              keeps the earliest solved_at and the latest last_attempt_at.
-  await pool.query(`
-    INSERT INTO user_task_progress
-      (user_id, session_id, task_id, status, attempts_count, last_attempt_at, solved_at)
-    SELECT
-      ta.user_id,
-      ta.session_id,
-      ta.task_id,
-      CASE
-        WHEN COUNT(*) FILTER (WHERE ta.is_correct = true) > 0 THEN 'solved'
-        ELSE 'in_progress'
-      END AS status,
-      COUNT(*) FILTER (WHERE ta.error_message IS NULL) AS attempts_count,
-      MAX(ta.created_at)                                AS last_attempt_at,
-      MIN(CASE WHEN ta.is_correct = true THEN ta.created_at END) AS solved_at
-    FROM task_attempts ta
-    WHERE ta.session_id IS NOT NULL
-    GROUP BY ta.user_id, ta.session_id, ta.task_id
-    ON CONFLICT (user_id, session_id, task_id) DO UPDATE SET
-      status = CASE
-        WHEN EXCLUDED.status = 'solved' OR user_task_progress.status = 'solved' THEN 'solved'
-        ELSE 'in_progress'
-      END,
-      attempts_count  = GREATEST(user_task_progress.attempts_count, EXCLUDED.attempts_count),
-      last_attempt_at = GREATEST(user_task_progress.last_attempt_at, EXCLUDED.last_attempt_at),
-      solved_at       = COALESCE(user_task_progress.solved_at, EXCLUDED.solved_at)
-  `);
+        -- Migrate legacy 'locked' rows BEFORE adding the new constraint,
+        -- because ADD CONSTRAINT validates all existing rows immediately.
+        UPDATE learning_sessions SET status = 'completed' WHERE status = 'locked';
 
-  // ── Learning session filters ─────────────────────────────────────────────────
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS learning_session_filters (
-      id           SERIAL PRIMARY KEY,
-      session_id   INTEGER NOT NULL REFERENCES learning_sessions(id) ON DELETE CASCADE,
-      filter_type  VARCHAR(20) NOT NULL,
-      filter_value VARCHAR(100) NOT NULL,
-      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
+        -- Add new constraint only after data is clean
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'ls_status_valid'
+            AND conrelid = 'learning_sessions'::regclass
+        ) THEN
+          ALTER TABLE learning_sessions
+            ADD CONSTRAINT ls_status_valid CHECK (status IN ('active', 'completed'));
+        END IF;
+      END $$;
+    `);
 
-  // Migration: rename locked_at → completed_at (preserves existing timestamps)
-  await pool.query(`
-    DO $$
-    BEGIN
-      IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'learning_sessions' AND column_name = 'locked_at'
-      ) AND NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'learning_sessions' AND column_name = 'completed_at'
-      ) THEN
-        ALTER TABLE learning_sessions RENAME COLUMN locked_at TO completed_at;
-      END IF;
-    END $$;
-  `);
+    // ── Backfill: reconcile user_task_progress from task_attempts ───────────────
+    // user_task_progress is the source of truth for current task status.
+    // This migration ensures any gaps or stale attempts_counts are fixed on startup.
+    // ON CONFLICT: preserves solved status, syncs attempts_count to the true count,
+    //              keeps the earliest solved_at and the latest last_attempt_at.
+    await client.query(`
+      INSERT INTO user_task_progress
+        (user_id, session_id, task_id, status, attempts_count, last_attempt_at, solved_at)
+      SELECT
+        ta.user_id,
+        ta.session_id,
+        ta.task_id,
+        CASE
+          WHEN COUNT(*) FILTER (WHERE ta.is_correct = true) > 0 THEN 'solved'
+          ELSE 'in_progress'
+        END AS status,
+        COUNT(*) FILTER (WHERE ta.error_message IS NULL) AS attempts_count,
+        MAX(ta.created_at)                                AS last_attempt_at,
+        MIN(CASE WHEN ta.is_correct = true THEN ta.created_at END) AS solved_at
+      FROM task_attempts ta
+      WHERE ta.session_id IS NOT NULL
+      GROUP BY ta.user_id, ta.session_id, ta.task_id
+      ON CONFLICT (user_id, session_id, task_id) DO UPDATE SET
+        status = CASE
+          WHEN EXCLUDED.status = 'solved' OR user_task_progress.status = 'solved' THEN 'solved'
+          ELSE 'in_progress'
+        END,
+        attempts_count  = GREATEST(user_task_progress.attempts_count, EXCLUDED.attempts_count),
+        last_attempt_at = GREATEST(user_task_progress.last_attempt_at, EXCLUDED.last_attempt_at),
+        solved_at       = COALESCE(user_task_progress.solved_at, EXCLUDED.solved_at)
+    `);
 
-  // Migration: drop is_locked — redundant with status, never read by any code
-  await pool.query(`
-    ALTER TABLE learning_sessions DROP COLUMN IF EXISTS is_locked
-  `);
+    // ── Learning session filters ─────────────────────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS learning_session_filters (
+        id           SERIAL PRIMARY KEY,
+        session_id   INTEGER NOT NULL REFERENCES learning_sessions(id) ON DELETE CASCADE,
+        filter_type  VARCHAR(20) NOT NULL,
+        filter_value VARCHAR(100) NOT NULL,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
 
-  // Migration: enforce UNIQUE(user_id, name) — one session name per user
-  // Step 1: rename any existing duplicates safely before adding the index.
-  //         Keeps the oldest session's name unchanged; suffixes later ones:
-  //         "Name (2)", "Name (3)", etc.
-  await pool.query(`
-    DO $$
-    DECLARE
-      dup    RECORD;
-      suffix INTEGER;
-      candidate TEXT;
-    BEGIN
-      FOR dup IN
-        SELECT id, user_id, name,
-               ROW_NUMBER() OVER (PARTITION BY user_id, name ORDER BY created_at ASC) AS rn
-        FROM learning_sessions
-        WHERE (user_id, name) IN (
-          SELECT user_id, name FROM learning_sessions
-          GROUP BY user_id, name HAVING COUNT(*) > 1
-        )
-      LOOP
-        CONTINUE WHEN dup.rn = 1;  -- keep the oldest unchanged
-        suffix := dup.rn;
+    // Migration: rename locked_at → completed_at (preserves existing timestamps)
+    await client.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'learning_sessions' AND column_name = 'locked_at'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name = 'learning_sessions' AND column_name = 'completed_at'
+        ) THEN
+          ALTER TABLE learning_sessions RENAME COLUMN locked_at TO completed_at;
+        END IF;
+      END $$;
+    `);
+
+    // Migration: drop is_locked — redundant with status, never read by any code
+    await client.query(`
+      ALTER TABLE learning_sessions DROP COLUMN IF EXISTS is_locked
+    `);
+
+    // Migration: enforce UNIQUE(user_id, name) — one session name per user
+    // Step 1: rename any existing duplicates safely before adding the index.
+    //         Keeps the oldest session's name unchanged; suffixes later ones:
+    //         "Name (2)", "Name (3)", etc.
+    await client.query(`
+      DO $$
+      DECLARE
+        dup    RECORD;
+        suffix INTEGER;
+        candidate TEXT;
+      BEGIN
+        FOR dup IN
+          SELECT id, user_id, name,
+                 ROW_NUMBER() OVER (PARTITION BY user_id, name ORDER BY created_at ASC) AS rn
+          FROM learning_sessions
+          WHERE (user_id, name) IN (
+            SELECT user_id, name FROM learning_sessions
+            GROUP BY user_id, name HAVING COUNT(*) > 1
+          )
         LOOP
-          candidate := dup.name || ' (' || suffix || ')';
-          EXIT WHEN NOT EXISTS (
-            SELECT 1 FROM learning_sessions
-            WHERE user_id = dup.user_id AND name = candidate AND id <> dup.id
-          );
-          suffix := suffix + 1;
+          CONTINUE WHEN dup.rn = 1;  -- keep the oldest unchanged
+          suffix := dup.rn;
+          LOOP
+            candidate := dup.name || ' (' || suffix || ')';
+            EXIT WHEN NOT EXISTS (
+              SELECT 1 FROM learning_sessions
+              WHERE user_id = dup.user_id AND name = candidate AND id <> dup.id
+            );
+            suffix := suffix + 1;
+          END LOOP;
+          UPDATE learning_sessions SET name = candidate WHERE id = dup.id;
         END LOOP;
-        UPDATE learning_sessions SET name = candidate WHERE id = dup.id;
-      END LOOP;
-    END $$;
-  `);
-  // Step 2: create the unique index (idempotent — IF NOT EXISTS)
-  await pool.query(`
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_learning_sessions_user_name_unique
-    ON learning_sessions(user_id, name)
-  `);
+      END $$;
+    `);
+    // Step 2: create the unique index (idempotent — IF NOT EXISTS)
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_learning_sessions_user_name_unique
+      ON learning_sessions(user_id, name)
+    `);
 
-  // Migration: add created_by_user_id to learning_sessions — distinguishes
-  // the session owner (user_id, whose progress/attempts it tracks) from who
-  // actually created it (a mentor/admin creating a session on a student's
-  // behalf, or the student themselves).
-  await pool.query(`
-    ALTER TABLE learning_sessions
-    ADD COLUMN IF NOT EXISTS created_by_user_id INTEGER REFERENCES users(id)
-  `);
+    // Migration: add created_by_user_id to learning_sessions — distinguishes
+    // the session owner (user_id, whose progress/attempts it tracks) from who
+    // actually created it (a mentor/admin creating a session on a student's
+    // behalf, or the student themselves).
+    await client.query(`
+      ALTER TABLE learning_sessions
+      ADD COLUMN IF NOT EXISTS created_by_user_id INTEGER REFERENCES users(id)
+    `);
 
-  // Backfill: existing sessions were all self-created, so owner == creator.
-  await pool.query(`
-    UPDATE learning_sessions
-    SET created_by_user_id = user_id
-    WHERE created_by_user_id IS NULL
-  `);
+    // Backfill: existing sessions were all self-created, so owner == creator.
+    await client.query(`
+      UPDATE learning_sessions
+      SET created_by_user_id = user_id
+      WHERE created_by_user_id IS NULL
+    `);
 
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_learning_sessions_created_by
-    ON learning_sessions(created_by_user_id)
-  `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_learning_sessions_created_by
+      ON learning_sessions(created_by_user_id)
+    `);
 
-  // Migration: created_by_user_id's FK originally had no ON DELETE behavior
-  // (implicit NO ACTION from the inline REFERENCES above), which blocks
-  // deleting a mentor/admin who has created sessions for other users. The
-  // desired behavior is that deleting the creator should never delete or
-  // block deleting anything — it should just null out created_by_user_id,
-  // leaving the session (and its real owner, user_id) untouched.
-  // confdeltype = 'n' means ON DELETE SET NULL is already in place, so this
-  // only drops + recreates the constraint the first time (or after a schema
-  // that predates this migration); it's a no-op on every subsequent boot.
-  await pool.query(`
-    DO $$
-    BEGIN
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'learning_sessions_created_by_user_id_fkey'
-          AND confdeltype = 'n'
-      ) THEN
-        ALTER TABLE learning_sessions
-          DROP CONSTRAINT IF EXISTS learning_sessions_created_by_user_id_fkey;
-        ALTER TABLE learning_sessions
-          ADD CONSTRAINT learning_sessions_created_by_user_id_fkey
-          FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL;
-      END IF;
-    END $$;
-  `);
+    // Migration: created_by_user_id's FK originally had no ON DELETE behavior
+    // (implicit NO ACTION from the inline REFERENCES above), which blocks
+    // deleting a mentor/admin who has created sessions for other users. The
+    // desired behavior is that deleting the creator should never delete or
+    // block deleting anything — it should just null out created_by_user_id,
+    // leaving the session (and its real owner, user_id) untouched.
+    // confdeltype = 'n' means ON DELETE SET NULL is already in place, so this
+    // only drops + recreates the constraint the first time (or after a schema
+    // that predates this migration); it's a no-op on every subsequent boot.
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'learning_sessions_created_by_user_id_fkey'
+            AND confdeltype = 'n'
+        ) THEN
+          ALTER TABLE learning_sessions
+            DROP CONSTRAINT IF EXISTS learning_sessions_created_by_user_id_fkey;
+          ALTER TABLE learning_sessions
+            ADD CONSTRAINT learning_sessions_created_by_user_id_fkey
+            FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL;
+        END IF;
+      END $$;
+    `);
 
-  // Migration: add archived_at / archived_by_user_id to learning_sessions —
-  // lifecycle *visibility* (archived = hidden from the normal session list,
-  // but every row it owns — task_attempts, user_task_progress,
-  // learning_session_filters — stays fully intact) is orthogonal to
-  // completion *state* (status: active/completed). A session can be
-  // completed-and-archived, active-and-archived, etc. Existing sessions stay
-  // unarchived by default (archived_at IS NULL) — no backfill needed since
-  // NULL already means "not archived". archived_by_user_id uses the same
-  // ON DELETE SET NULL pattern as created_by_user_id above: deleting whoever
-  // archived a session must never delete or block deleting the session itself.
-  await pool.query(`
-    ALTER TABLE learning_sessions
-    ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ
-  `);
-  await pool.query(`
-    ALTER TABLE learning_sessions
-    ADD COLUMN IF NOT EXISTS archived_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL
-  `);
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_learning_sessions_archived_at
-    ON learning_sessions(archived_at)
-  `);
+    // Migration: add archived_at / archived_by_user_id to learning_sessions —
+    // lifecycle *visibility* (archived = hidden from the normal session list,
+    // but every row it owns — task_attempts, user_task_progress,
+    // learning_session_filters — stays fully intact) is orthogonal to
+    // completion *state* (status: active/completed). A session can be
+    // completed-and-archived, active-and-archived, etc. Existing sessions stay
+    // unarchived by default (archived_at IS NULL) — no backfill needed since
+    // NULL already means "not archived". archived_by_user_id uses the same
+    // ON DELETE SET NULL pattern as created_by_user_id above: deleting whoever
+    // archived a session must never delete or block deleting the session itself.
+    await client.query(`
+      ALTER TABLE learning_sessions
+      ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ
+    `);
+    await client.query(`
+      ALTER TABLE learning_sessions
+      ADD COLUMN IF NOT EXISTS archived_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_learning_sessions_archived_at
+      ON learning_sessions(archived_at)
+    `);
 
-  // ── Mentor assignments ───────────────────────────────────────────────────
-  // Links a mentor (displayed as "Professor" in the UI — the role value
-  // itself stays "mentor") to the students they can view/manage. Read/written
-  // by routes/mentorAssignments.js (admin CRUD) and routes/mentorStudents.js
-  // (mentor's own roster), and queried by utils/authz.js's canAccessStudent
-  // on every mentor-scoped request.
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS mentor_assignments (
-      id         SERIAL PRIMARY KEY,
-      mentor_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (mentor_id, student_id)
-    )
-  `);
+    // ── Mentor assignments ───────────────────────────────────────────────────
+    // Links a mentor (displayed as "Professor" in the UI — the role value
+    // itself stays "mentor") to the students they can view/manage. Read/written
+    // by routes/mentorAssignments.js (admin CRUD) and routes/mentorStudents.js
+    // (mentor's own roster), and queried by utils/authz.js's canAccessStudent
+    // on every mentor-scoped request.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS mentor_assignments (
+        id         SERIAL PRIMARY KEY,
+        mentor_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (mentor_id, student_id)
+      )
+    `);
 
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_mentor_assignments_student
-    ON mentor_assignments(student_id)
-  `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_mentor_assignments_student
+      ON mentor_assignments(student_id)
+    `);
 
-  console.log('Progress tables ready');
+    await client.query('COMMIT');
+    console.log('Progress tables ready');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 module.exports = initDb;

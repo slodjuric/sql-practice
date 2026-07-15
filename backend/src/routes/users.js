@@ -4,6 +4,7 @@ const pool = require('../db');
 const { VALID_ROLES, isValidRole } = require('../utils/roleValidator');
 const { requireRole } = require('../utils/authz');
 const { MIN_PASSWORD_LENGTH, validatePasswordLength, hashPassword } = require('../utils/passwordPolicy');
+const { sendUnexpectedError, safeRollback } = require('../utils/requestLogger');
 
 // GET /api/users
 // Admin-only. Acting user is resolved from the authenticated session
@@ -15,7 +16,7 @@ router.get('/', requireRole('admin'), async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendUnexpectedError(req, res, err, { route: 'GET /api/users' });
   }
 });
 
@@ -46,7 +47,7 @@ router.get('/admin-summary', requireRole('admin'), async (req, res) => {
     `);
     res.json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendUnexpectedError(req, res, err, { route: 'GET /api/users/admin-summary' });
   }
 });
 
@@ -87,7 +88,7 @@ router.post('/', requireRole('admin'), async (req, res) => {
     if (err.code === '23505') {
       return res.status(409).json({ error: 'Username already exists.' });
     }
-    res.status(500).json({ error: err.message });
+    sendUnexpectedError(req, res, err, { route: 'POST /api/users' });
   }
 });
 
@@ -133,8 +134,8 @@ router.delete('/:id', requireRole('admin'), async (req, res) => {
     await client.query('COMMIT');
     res.json({ success: true });
   } catch (err) {
-    await client.query('ROLLBACK');
-    res.status(500).json({ error: err.message });
+    await safeRollback(client, req, { route: 'DELETE /api/users/:id', targetUserId: userId });
+    sendUnexpectedError(req, res, err, { route: 'DELETE /api/users/:id', targetUserId: userId });
   } finally {
     client.release();
   }
@@ -202,8 +203,8 @@ router.patch('/:id/password', requireRole('admin'), async (req, res) => {
     await client.query('COMMIT');
     res.json(result.rows[0]);
   } catch (err) {
-    await client.query('ROLLBACK');
-    res.status(500).json({ error: err.message });
+    await safeRollback(client, req, { route: 'PATCH /api/users/:id/password', targetUserId: userId });
+    sendUnexpectedError(req, res, err, { route: 'PATCH /api/users/:id/password', targetUserId: userId });
   } finally {
     client.release();
   }
@@ -282,8 +283,8 @@ router.patch('/:id/role', requireRole('admin'), async (req, res) => {
     await client.query('COMMIT');
     res.json({ ...result.rows[0], removedAssignments });
   } catch (err) {
-    await client.query('ROLLBACK');
-    res.status(500).json({ error: err.message });
+    await safeRollback(client, req, { route: 'PATCH /api/users/:id/role', targetUserId: userId });
+    sendUnexpectedError(req, res, err, { route: 'PATCH /api/users/:id/role', targetUserId: userId });
   } finally {
     client.release();
   }

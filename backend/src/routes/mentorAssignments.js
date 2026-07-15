@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db');
 const { requireRole } = require('../utils/authz');
+const { sendUnexpectedError } = require('../utils/requestLogger');
 
 const ASSIGNMENT_SELECT = `
   SELECT
@@ -36,7 +37,7 @@ router.get('/', requireRole('admin'), async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendUnexpectedError(req, res, err, { route: 'GET /api/mentor-assignments' });
   }
 });
 
@@ -97,7 +98,7 @@ router.post('/', requireRole('admin'), async (req, res) => {
       throw err;
     }
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendUnexpectedError(req, res, err, { route: 'POST /api/mentor-assignments', mentorId, studentId });
   }
 });
 
@@ -119,7 +120,7 @@ router.delete('/:id', requireRole('admin'), async (req, res) => {
     }
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendUnexpectedError(req, res, err, { route: 'DELETE /api/mentor-assignments/:id', assignmentId: id });
   }
 });
 

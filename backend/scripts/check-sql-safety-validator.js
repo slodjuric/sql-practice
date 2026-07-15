@@ -165,6 +165,105 @@ const cases = [
     expectSafe:    false,
     expectKeyword: 'INTO',
   },
+
+  // ─── Single-statement enforcement (CRIT-1 fix) ─────────────────────────────
+  // queryRunner.js runs raw SQL text with no parameters, which uses
+  // node-postgres's simple-query protocol — the one path that executes
+  // multiple `;`-separated statements in one call. These cases cover the
+  // scanner in sqlSafetyValidator.js that rejects anything but a single
+  // statement (with at most one optional trailing semicolon), including its
+  // string/identifier/comment-aware semicolon handling.
+  {
+    id: 25,
+    name: 'No semicolon at all — allowed',
+    sql: 'SELECT 1',
+    expectSafe: true,
+  },
+  {
+    id: 26,
+    name: 'One trailing semicolon — allowed',
+    sql: 'SELECT 1;',
+    expectSafe: true,
+  },
+  {
+    id: 27,
+    name: 'Trailing whitespace after the semicolon — allowed',
+    sql: 'SELECT 1;   \n\t',
+    expectSafe: true,
+  },
+  {
+    id: 28,
+    name: 'Stacked SELECT statements — rejected',
+    sql: 'SELECT 1; SELECT 2',
+    expectSafe:       false,
+    expectSingleStmt: true,
+  },
+  {
+    id: 29,
+    name: 'Stacked pg_sleep statements (connection-pool-exhaustion shape) — rejected',
+    sql: 'SELECT pg_sleep(4); SELECT pg_sleep(4);',
+    expectSafe:       false,
+    expectSingleStmt: true,
+  },
+  {
+    id: 30,
+    name: 'SELECT followed by SET — rejected (SET is not a blocked keyword on its own)',
+    sql: 'SELECT 1; SET search_path TO public',
+    expectSafe:       false,
+    expectSingleStmt: true,
+  },
+  {
+    id: 31,
+    name: 'Double trailing semicolon — rejected',
+    sql: 'SELECT 1;;',
+    expectSafe:       false,
+    expectSingleStmt: true,
+  },
+  {
+    id: 32,
+    name: 'CTE followed by a second statement — rejected',
+    sql: 'WITH x AS (SELECT 1) SELECT * FROM x; SELECT 2',
+    expectSafe:       false,
+    expectSingleStmt: true,
+  },
+  {
+    id: 33,
+    name: 'Semicolon inside a single-quoted string literal — not a separator, allowed',
+    sql: "SELECT 'a;b';",
+    expectSafe: true,
+  },
+  {
+    id: 34,
+    name: 'Semicolon inside a double-quoted identifier — not a separator, allowed',
+    sql: 'SELECT "column;name" FROM some_table;',
+    expectSafe: true,
+  },
+  {
+    id: 35,
+    name: 'Semicolon inside a -- line comment — not a separator, allowed',
+    sql: 'SELECT 1 -- comment with a ; in it\n',
+    expectSafe: true,
+  },
+  {
+    id: 36,
+    name: 'Semicolon inside a /* */ block comment — not a separator, allowed',
+    sql: 'SELECT 1 /* comment with a ; in it */',
+    expectSafe: true,
+  },
+  {
+    id: 37,
+    name: 'A real second statement hidden after a comment is still rejected',
+    sql: 'SELECT 1 /* just a comment */; SELECT 2',
+    expectSafe:       false,
+    expectSingleStmt: true,
+  },
+  {
+    id: 38,
+    name: 'An escaped quote inside a string literal does not end it early — semicolon after is still top-level',
+    sql: "SELECT 'it''s; fine' FROM students; SELECT 2",
+    expectSafe:       false,
+    expectSingleStmt: true,
+  },
 ];
 
 // ─── Runner ───────────────────────────────────────────────────────────────────
@@ -187,6 +286,13 @@ for (const c of cases) {
     checks.push({
       ok:  hasKeyword,
       msg: `reason should mention "Detected: ${c.expectKeyword}", got: ${JSON.stringify(result.reason)}`,
+    });
+  }
+
+  if (c.expectSafe === false && c.expectSingleStmt) {
+    checks.push({
+      ok:  result.reason === 'Only one SQL statement is allowed.',
+      msg: `reason should be "Only one SQL statement is allowed.", got: ${JSON.stringify(result.reason)}`,
     });
   }
 
